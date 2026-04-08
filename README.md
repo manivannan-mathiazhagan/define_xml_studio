@@ -1,192 +1,133 @@
-# Define.xml Studio
+# Define.xml Studio v1
 
-Define.xml Studio is an internal Python-based desktop tool designed to support **Define-XML generation** and **CDISC metadata validation** using study specifications, SAS datasets, XPT files, and official CDISC/NCI reference sources.
+Define.xml Studio v1 is the backend foundation for an internal Define-XML and CDISC validation tool.
 
-The tool provides a unified workflow for converting SDTM and ADaM study metadata into a structured, reviewable, and reusable process for generating `define.xml`, along with validation and discrepancy reporting.
+This version is intentionally focused on the first reliable layer:
 
----
+- read internal SDTM and ADaM specification templates
+- normalize metadata from both workbooks
+- optionally scan SAS7BDAT and XPT datasets
+- compare datasets against the specifications
+- export a reviewable Excel workbook with issues and summaries
 
-## Purpose
+This is the correct first step before adding GUI-driven Define-XML generation, CDISC Library integration, NCI terminology pull, and CORE-based validation.
 
-This tool is designed to:
+## Recommended repository structure
 
-- Read internal **SDTM and ADaM specification templates**
-- Scan study datasets from **SAS7BDAT** and **XPT** files
-- Compare specification metadata against implemented datasets
-- Support import and usage of **NCI/CDISC Controlled Terminology**
-- Connect to **CDISC Library API** for standards metadata
-- Perform validation using CDISC-based rules and internal checks
-- Generate **Define-XML**
-- Export validation and discrepancy reports
+```text
+define_xml_studio/
+│
+├── README.md
+├── requirements.txt
+├── app.py
+│
+├── config/
+│   └── settings.json
+│
+├── gui/
+│   ├── main_window.py
+│   ├── tab_study_setup.py
+│   ├── tab_spec_upload.py
+│   ├── tab_dataset_scan.py
+│   ├── tab_validation.py
+│   └── tab_generate.py
+│
+├── core/
+│   ├── models.py
+│   ├── oid_builder.py
+│   ├── validator_internal.py
+│   ├── define_writer.py
+│   ├── xml_validator.py
+│   └── qc_writer.py
+│
+├── readers/
+│   ├── spec_reader_sdtm.py
+│   ├── spec_reader_adam.py
+│   ├── dataset_reader.py
+│   └── terminology_reader.py
+│
+├── connectors/
+│   ├── cdisc_library_client.py
+│   ├── nci_evs_client.py
+│   └── core_runner.py
+│
+├── templates/
+│   ├── sdtm_template.xlsx
+│   └── adam_template.xlsx
+│
+├── outputs/
+├── logs/
+└── tests/
+```
 
----
+## What this v1 script does
 
-## Main Features
+The included `v1_spec_parser.py` script:
 
-### Metadata Input
-- Load SDTM specification workbook
-- Load ADaM specification workbook
-- Support internal company templates
-- Handle:
-  - Study-level metadata
-  - Dataset-level metadata
-  - Variable-level metadata
-  - Value-level metadata
-  - Codelists
-  - Methods
-  - Comments
+- reads the uploaded SDTM and ADaM template formats
+- detects domain sheets and variable specifications
+- reads supporting sheets such as domains, value metadata, and formats
+- standardizes column names such as `Term` and `Terms`
+- optionally reads `.sas7bdat` and `.xpt` datasets from a folder
+- compares actual datasets to the specification
+- writes an Excel report with:
+  - Summary
+  - Domain-level counts
+  - Variable-level normalized metadata
+  - Value metadata
+  - Formats
+  - Dataset comparison
+  - Issues
 
-### Dataset Reading
-- Read `.sas7bdat` datasets
-- Read `.xpt` datasets
-- Extract dataset and variable structure
-- Compare implementation vs specifications
+## Installation
 
-### Controlled Terminology Support
-- Import local NCI/CDISC terminology files
-- Support future API-based terminology pull
-- Validate codelist references
+```bash
+pip install -r requirements.txt
+```
 
-### Standards Integration
-- Connect to CDISC Library API
-- Support standard/version-aware validation
+## Run
 
-### Validation
-- Specification completeness checks
-- Dataset vs specification comparison
-- Missing/extra dataset and variable detection
-- Type, length, and label mismatch checks
-- Codelist and terminology validation
-- Define-XML readiness checks
-- Optional integration with CDISC CORE rules engine
+```bash
+python v1_spec_parser.py \
+  --sdtm-spec "TMP-BP-006 v1_ SDTM Specification Template.xlsx" \
+  --adam-spec "TMP-BP-004 v1 ADaM-Analysis Dataset Specification Template.xlsx" \
+  --data-dir "path/to/datasets" \
+  --output "define_xml_studio_v1_report.xlsx"
+```
 
-### Output
-- Generate `define.xml`
-- Export validation report (Excel)
-- Export discrepancy log (CSV/Excel)
-- Save project metadata for reuse
+If you do not have datasets yet, the script still works without `--data-dir`.
 
----
+## Notes
 
-## Workflow
+- This version does **not** generate Define-XML yet.
+- This version is the backend foundation that your GUI and Define-XML writer should sit on top of.
+- Once the template structures are stable, the next step is to add:
+  - Define-XML writer
+  - GUI
+  - CDISC Library API pull
+  - NCI terminology import
+  - CORE integration
 
-1. Load study information
-2. Upload SDTM and ADaM specs
-3. Select SAS/XPT dataset folder
-4. Import or fetch controlled terminology
-5. Review dataset vs metadata comparison
-6. Run validation checks
-7. Resolve issues
-8. Generate `define.xml`
-9. Export QC and discrepancy reports
+## Internal template assumptions currently handled
 
----
+### SDTM workbook
+- domain metadata from `Domains`
+- value metadata from `ValueMetadata`
+- codelist/format-like data from `Formats`
+- individual domain sheets such as `DM`, `AE`, `VS`, etc.
 
-## Expected Inputs
+### ADaM workbook
+- domain metadata from `Domains`
+- value metadata from `Valuemetadata`
+- codelist/format-like data from `Formats`
+- individual domain sheets such as `ADSL`, `ADAE`, `ADLB`, etc.
 
-- SDTM specification Excel file
-- ADaM specification Excel file
-- SAS datasets (`.sas7bdat`)
-- Transport datasets (`.xpt`)
-- Optional:
-  - Controlled terminology files
-  - Methods/comments metadata
-  - Value-level metadata
-  - Document references
+## Next build steps
 
----
-
-## Expected Outputs
-
-- `define.xml`
-- Validation report (Excel)
-- Discrepancy log (CSV/Excel)
-- Processing log
-- Optional metadata snapshot (JSON)
-
----
-
-## Technology Stack
-
-- **PySide6** – GUI
-- **pandas** – data handling
-- **openpyxl** – Excel processing
-- **pyreadstat** – SAS/XPT reading
-- **requests** – API integration
-- **lxml** – XML generation/validation
-- **sqlite3** – local caching and project storage
-
----
-
-## Project Scope
-
-This tool is intended for internal use and built around company-specific SDTM and ADaM specification templates.
-
-It is designed to support:
-
-- Metadata review
-- Define-XML generation
-- Standards-aligned validation
-- Controlled terminology integration
-- Study-level QC workflows
-
----
-
-## Important Note
-
-Define-XML generation depends on **complete and accurate specification metadata**.
-
-Datasets alone are not sufficient to derive:
-
-- Origins
-- Methods
-- Comments
-- Value-level metadata
-- Controlled terminology intent
-- Computational descriptions
-- Document references
-
-Specifications remain the primary source of truth.
-
----
-
-## Development Scope (v1)
-
-The initial version will focus on:
-
-- SDTM and ADaM spec template ingestion
-- SAS/XPT dataset scanning
-- Metadata comparison and discrepancy reporting
-- Controlled terminology import
-- Basic Define-XML generation
-- Internal validation workflows
-
----
-
-## Future Enhancements
-
-- Full CDISC Library API integration
-- Automated NCI terminology updates
-- Advanced Define-XML features (ARM, VLM enhancements)
-- Project save/load workflows
-- Packaging for enterprise deployment
-- Enhanced validation dashboards
-
----
-
-## Next Steps
-
-To proceed with implementation:
-
-- Review SDTM and ADaM specification templates
-- Align tool with:
-  - Sheet structure
-  - Column names
-  - Required metadata fields
-  - Template-specific logic
-
----
-
-## License
-
-Internal use only.
+1. Freeze spec-template parsing
+2. Add local project save/load
+3. Add Define-XML object model
+4. Generate base Define-XML
+5. Add GUI
+6. Add CDISC and NCI connectors
+7. Add validation engine integration
