@@ -2,10 +2,10 @@
   "use_json_defaults": true,
   "sharepoint": {
     "site_name": "BSP - Team Mani",
-    "spec_file": "BSP/Siolta STMC-103H-102 ADaM Specs_define.xlsx"
+    "spec_file": "BSP/Siolta STMC-103H-102 SDTM Specs.xlsx"
   },
   "study": {
-    "standard": "ADaM",
+    "standard": "SDTM",
     "study_oid": "STMC-103H-102",
     "study_name": "STMC-103H-102",
     "study_description": "A PHASE 1B/2, RANDOMIZED, DOUBLE-BLIND, PLACEBO-CONTROLLED, MULTI-CENTER STUDY OF STMC-103H IN NEONATES AND INFANTS AT RISK FOR DEVELOPING ALLERGIC DISEASE",
@@ -14,7 +14,7 @@
   "versions": {
     "define_version": "2.0",
     "odm_version": "1.3.2",
-    "ig_version": "1.3",
+    "ig_version": "3.3",
     "ct_version": "2023-09-29",
     "meddra_version": "24.0",
     "whodrug_version": "B3MAR2025"
@@ -28,7 +28,7 @@
     "fetch_nci_codes": true
   },
   "paths": {
-    "xpt_folder": "P:/BSP_LocalDev/Manivannan.Mathialag/zzzz_My_SAS_Files/chk xpt/XPT/XPT ad"
+    "xpt_folder": "P:/BSP_LocalDev/Manivannan.Mathialag/zzzz_My_SAS_Files/chk xpt/XPT"
   },
   "documents": {
     "include_acrf": true,
