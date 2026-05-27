@@ -3620,6 +3620,8 @@ class DefineStudio(QtWidgets.QWidget):
         self.ct_alias_map = {}
         self.spec_model = None
         self.dataset_metadata_model = None
+        self.review_export_available = False
+        self.define_generated = False
 
         self.setWindowTitle("Define XML Generator")
         self.setMinimumSize(1300, 800)
@@ -3639,14 +3641,34 @@ class DefineStudio(QtWidgets.QWidget):
         root.setContentsMargins(10, 8, 10, 8)
         root.setSpacing(8)
 
-        header = QtWidgets.QFrame(); header.setObjectName("Header")
-        h = QtWidgets.QHBoxLayout(header); h.setContentsMargins(14, 10, 14, 10)
-        title_box = QtWidgets.QVBoxLayout()
-        title = QtWidgets.QLabel("Define XML Generator  •  CDISC Define-XML Studio")
-        title.setObjectName("Title")
-        title_box.addWidget(title)
-        h.addLayout(title_box); h.addStretch()
+        header = QtWidgets.QLabel("Define XML Generator")
+        header.setAlignment(QtCore.Qt.AlignCenter)
+        header.setStyleSheet("""
+            QLabel {
+                color: black; background: #bfe9f7; padding: 10px 0 8px 0; border-radius: 16px;
+                font-family: 'Times New Roman'; font-size: 20pt; font-weight: bold;
+            }
+        """)
         root.addWidget(header)
+
+        contact_note = QtWidgets.QLabel(
+            "For queries / suggestions / issues: Manivannan.Mathialagan@veristat.com"
+        )
+        contact_note.setAlignment(QtCore.Qt.AlignCenter)
+        contact_note.setWordWrap(True)
+        contact_note.setStyleSheet("""
+            QLabel {
+                background: #fff3c9;
+                color: #184a78;
+                border: 1px solid #e6d27d;
+                border-radius: 10px;
+                padding: 6px 10px;
+                font-family: 'Times New Roman';
+                font-size: 11pt;
+                font-style: italic;
+            }
+        """)
+        root.addWidget(contact_note)
 
         controls = QtWidgets.QFrame(); controls.setObjectName("Controls")
         self.controls_frame = controls
@@ -3715,22 +3737,26 @@ class DefineStudio(QtWidgets.QWidget):
         ]
         for i, btn in enumerate(self.action_buttons):
             base, hover = button_colors[i]
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            btn.setMinimumWidth(0)
             btn.setStyleSheet(
-                f"QPushButton {{ background-color: {base}; color: white; border-radius: 8px; padding: 7px 12px; font-weight: bold; }}"
+                f"QPushButton {{ background-color: {base}; color: white; border-radius: 10px; padding: 6px 10px; min-height: 34px; font-family: 'Times New Roman'; font-size: 11pt; font-weight: bold; }}"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
-                "QPushButton:disabled { background-color: #aeb8c2; color: #f1f3f5; }"
+                "QPushButton:disabled { background-color: #d9d9d9; color: #7a7a7a; }"
             )
             grid.addWidget(btn, 0, i)
-        grid.addWidget(self.load_spec_vlm_chk, 1, 0, 1, 3)
-        grid.setColumnStretch(len(self.action_buttons), 1)
-        controls.setMaximumHeight(96)
+            grid.setColumnStretch(i, 1)
+        grid.addWidget(self.load_spec_vlm_chk, 1, 0, 1, len(self.action_buttons))
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        controls.setMaximumHeight(90)
         root.addWidget(controls)
 
         # Status panel is intentionally placed near the top so workflow progress is visible
         # even when the user is working inside any tab. New messages are appended at the bottom.
         self.status_list = QtWidgets.QListWidget()
         self.status_list.setObjectName("StatusList")
-        self.status_list.setMaximumHeight(132)
+        self.status_list.setMaximumHeight(64)
         self.status_list.setAlternatingRowColors(False)
         self.status_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         root.addWidget(self.status_list)
@@ -3739,6 +3765,8 @@ class DefineStudio(QtWidgets.QWidget):
         self.status.setVisible(False)
 
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.tabBar().setExpanding(True)
+        self.tabs.tabBar().setUsesScrollButtons(False)
         root.addWidget(self.tabs, 1)
 
         self.tab_summary = QtWidgets.QWidget(); self.summary_text = QtWidgets.QTextEdit(); self.summary_text.setReadOnly(True)
@@ -4829,7 +4857,9 @@ class DefineStudio(QtWidgets.QWidget):
                 self.validation_summary_label.setStyleSheet("background-color: #e7f7e7; color: #155724; border: 1px solid #4f9e4f; border-radius: 8px; padding: 6px; font-weight: bold;")
         self.validation_view.resizeColumnsToContents()
         self.tabs.setCurrentWidget(self.tab_validation)
+        self.review_export_available = True
         self.set_status(f"Validation complete: {n_err} errors, {n_warn} warnings", "done" if n_err == 0 and n_warn == 0 else "error" if n_err > 0 else "info")
+        self.set_workflow_state("validated")
         return n_err == 0
 
     def generate_define_xml(self):
@@ -4884,8 +4914,8 @@ class DefineStudio(QtWidgets.QWidget):
                 document_links_df=self.document_links_df,
             )
             out_xml = writer.write()
-            self.set_status("Exporting define review workbook", "running")
-            self.export_review_xlsx(auto_path=str(Path(out_dir) / "define_review_inputs.xlsx"))
+            self.define_generated = True
+            self.review_export_available = True
             self.set_status(f"define.xml created: {out_xml}", "done")
             self.set_workflow_state("generated")
             QtWidgets.QMessageBox.information(self, "Define created", f"define.xml created:\n\n{out_xml}")
@@ -4894,7 +4924,11 @@ class DefineStudio(QtWidgets.QWidget):
             self.set_status("Define generation failed", "error")
         finally:
             # Never leave buttons frozen after Generate Define, even when validation/message boxes return early.
-            if getattr(self, "editor_df", pd.DataFrame()).empty:
+            if getattr(self, "define_generated", False):
+                self.set_workflow_state("generated")
+            elif getattr(self, "review_export_available", False):
+                self.set_workflow_state("validated")
+            elif getattr(self, "editor_df", pd.DataFrame()).empty:
                 self.set_workflow_state("initial")
             elif getattr(self, "formats_df", pd.DataFrame()).empty:
                 self.set_workflow_state("metadata")
@@ -5004,12 +5038,16 @@ class DefineStudio(QtWidgets.QWidget):
                 # Generate Define also runs validation internally, so it should not stay frozen
                 # after Format/VLM generation.
                 self.btn_define.setEnabled(True)
+
+            if stage in {"validated", "generated"} or getattr(self, "review_export_available", False):
                 self.btn_export.setEnabled(True)
         except Exception:
             pass
 
     def load_spec_data_and_build_metadata(self):
         """Combined button action: Load Spec, Load Data, Build Metadata Editor."""
+        self.review_export_available = False
+        self.define_generated = False
         self.set_buttons_busy(True)
         ok = False
         try:
@@ -5033,6 +5071,8 @@ class DefineStudio(QtWidgets.QWidget):
 
     def generate_formats_and_vlm(self):
         """Combined button action: Generate/Refresh Formats and Generate VLM."""
+        self.review_export_available = False
+        self.define_generated = False
         self.set_buttons_busy(True)
         ok = False
         try:
