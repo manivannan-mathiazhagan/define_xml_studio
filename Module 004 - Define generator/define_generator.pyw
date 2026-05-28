@@ -166,10 +166,11 @@ SPEC_COLUMNS = [
 
 EDITOR_COLUMNS = [
     "Dataset", "Variable", "Label", "Keep", "ID Var", "Length", "Type",
-    "Format", "Origin", "Comments", "Data Type", "Data Format", "Order", "Source"
+    "Format", "Origin", "Source", "Has No Data", "Comments",
+    "Data Type", "Data Format", "Order", "XPT Source"
 ]
 
-EDITABLE_COLUMNS = {"Type", "Format", "Origin", "Comments"}
+EDITABLE_COLUMNS = {"Type", "Format", "Origin", "Source", "Has No Data", "Comments"}
 
 VLM_COLUMNS = [
     "Dataset", "Grouping Variable", "Group Value", "Group Label",
@@ -177,16 +178,20 @@ VLM_COLUMNS = [
     "Grouping Variable 2", "Group Value 2",
     "Grouping Variable 3", "Group Value 3",
     "Grouping Variable 4", "Group Value 4",
-    "Where Clause", "Result Variable", "Length", "Type", "Format", "Origin", "Role", "Comment"
+    "Where Clause", "Result Variable", "Length", "Type", "Format",
+    "Origin", "Source", "Role", "Comment"
 ]
 
 FORMAT_COLUMNS = [
     "Order", "Format", "Code", "Decode",
-    "Codelist Code", "Term Code",
+    "Codelist Code", "Term Code", "Terminology", "Comment",
     "Source Dataset", "Source Variable", "Decode Variable", "Sort Value"
 ]
 
-DOMAIN_COLUMNS = ["Dataset", "Description", "Class", "Structure", "Purpose", "Keys", "Documentation", "Location"]
+DOMAIN_COLUMNS = [
+    "Dataset", "Description", "Class", "Subclass", "Standard", "Has No Data",
+    "Structure", "Purpose", "Keys", "Documentation", "Location"
+]
 DOCUMENTS_COLUMNS = ["ID", "Title", "Href"]
 DOCUMENT_LINKS_COLUMNS = ["ID", "Document", "Pages"]
 
@@ -417,6 +422,180 @@ def normalize_domain_class(value):
     return cls
 
 
+def yes_no(value, default="No"):
+    """Normalize Yes/No fields used by Define-XML 2.1 HasNoData."""
+    txt = safe_upper(value)
+    if txt in {"Y", "YES", "TRUE", "1"}:
+        return "Yes"
+    if txt in {"N", "NO", "FALSE", "0"}:
+        return "No"
+    return default
+
+
+def add_has_no_data_attr(attrs, attr_name, value):
+    """Write Define-XML 2.1 def:HasNoData only when value is Yes.
+
+    In Define-XML 2.1, HasNoData is a conditional flag used for datasets/
+    variables/value-level variables that have no submitted data. It is not a
+    required Yes/No field. Validators may report DD0003 when the attribute is
+    written with value "No". Therefore: write def:HasNoData="Yes" only
+    when the source metadata explicitly says Yes; otherwise omit it.
+    """
+    if yes_no(value, default="No") == "Yes":
+        attrs[attr_name] = "Yes"
+    else:
+        attrs.pop(attr_name, None)
+    return attrs
+
+
+def standard_version_oid_part(value, fallback=""):
+    """Return a valid version part for StandardOID without forcing leading X.
+
+    The complete OID starts with STD..., so a version such as 3.3 can remain
+    3.3 after the hyphen: STD.SDTMIG-3.3.
+    """
+    txt = safe_text(value) or safe_text(fallback)
+    txt = txt.replace(" ", "")
+    txt = re.sub(r"[^A-Za-z0-9_.-]", "_", txt)
+    return txt or "1"
+
+
+def standard_oid(standard, ig_version="", ct_version=""):
+    """Build stable Define-XML 2.1 Standard OIDs."""
+    std = safe_upper(standard)
+    ig = standard_version_oid_part(ig_version, "3.4" if std == "SDTM" else "1.3")
+    ct = standard_version_oid_part(ct_version, "")
+    if std == "ADAM":
+        return f"STD.ADAMIG-{ig}"
+    return f"STD.SDTMIG-{ig}"
+
+
+def terminology_oid(standard, ct_version=""):
+    std = safe_upper(standard)
+    ct = safe_text(ct_version).replace(" ", "") or "CT"
+    return f"STD.{('ADAMCT' if std == 'ADAM' else 'SDTMCT')}-{xml_id(ct)}"
+
+
+def normalize_standard_oid_value(value, standard, ig_version="", ct_version=""):
+    """Normalize GUI/spec Standard/Terminology text to the generated def:Standard OID.
+
+    In Define-XML 2.1 every ItemGroupDef/@def:StandardOID and
+    CodeList/@def:StandardOID must match an OID in def:Standards exactly.
+    Do not preserve workbook values such as STD.SDTMIG or STD.SDTMIG-X3.X3
+    because they often do not match the generated Standards block.
+    """
+    txt = safe_text(value)
+    up = safe_upper(txt)
+
+    # Any IG-looking value should resolve to the single generated IG Standard OID.
+    if up in {"SDTM", "SDTMIG", "SDTM-IG", "ADAM", "ADAMIG", "ADAM-IG"} or "SDTMIG" in up or "ADAMIG" in up:
+        return standard_oid(standard, ig_version, ct_version)
+
+    # Any CT/terminology-looking value should resolve to the generated CT Standard OID.
+    if up in {"SDTMCT", "SDTM CT", "SDTM TERMINOLOGY", "ADAMCT", "ADAM CT", "ADAM TERMINOLOGY", "CT", "TERMINOLOGY"} or "SDTMCT" in up or "ADAMCT" in up or "CDISC/NCI" in up:
+        return terminology_oid(standard, ct_version)
+
+    if txt.startswith("STD."):
+        # Preserve only truly custom standards.
+        return txt
+
+    # Dataset-level fallback is the implementation guide, not CT.
+    return standard_oid(standard, ig_version, ct_version)
+
+
+SDTM_SUBCLASS_MAP = {
+    "AE": "ADVERSE EVENTS", "CE": "CLINICAL EVENTS", "DS": "DISPOSITION", "DV": "PROTOCOL DEVIATIONS",
+    "HO": "HEALTHCARE ENCOUNTERS", "MH": "MEDICAL HISTORY", "BE": "BIOLOGICAL ENTITY IDENTIFICATION",
+    "CM": "MEDICATIONS", "EC": "EXPOSURE AS COLLECTED", "EX": "EXPOSURE", "PR": "PROCEDURES", "SU": "SUBSTANCE USE",
+    "DA": "DRUG ACCOUNTABILITY",
+    "DM": "DEMOGRAPHICS", "CO": "COMMENTS", "SE": "SUBJECT ELEMENTS", "SV": "SUBJECT VISITS",
+    "LB": "LABORATORY TEST RESULTS", "VS": "VITAL SIGNS", "EG": "ECG TEST RESULTS", "QS": "QUESTIONNAIRES",
+    "MB": "MICROBIOLOGY SPECIMEN", "MS": "MICROBIOLOGY SUSCEPTIBILITY", "PC": "PHARMACOKINETIC CONCENTRATIONS",
+    "PP": "PHARMACOKINETIC PARAMETERS", "FA": "FINDINGS ABOUT", "TU": "TUMOR IDENTIFICATION",
+    "TR": "TUMOR RESULTS", "RS": "DISEASE RESPONSE", "RE": "RESPIRATORY SYSTEM FINDINGS", "SC": "SUBJECT CHARACTERISTICS",
+    "TA": "TRIAL ARMS", "TE": "TRIAL ELEMENTS", "TI": "TRIAL INCLUSION/EXCLUSION CRITERIA",
+    "TS": "TRIAL SUMMARY", "TV": "TRIAL VISITS",
+    "RELREC": "RELATED RECORDS", "SUPPQUAL": "SUPPLEMENTAL QUALIFIERS",
+}
+
+
+def default_dataset_class(dataset, standard=""):
+    """Return a safe default Define-XML 2.1 def:Class/@Name.
+
+    In Define-XML 2.1 the dataset class element must appear before ItemRef.
+    If the Domains sheet is blank/missing for Class, validators can flag the
+    following ItemRef as invalid and then also report HasNoData as missing.
+    """
+    ds = safe_upper(dataset)
+    std = safe_upper(standard)
+    if std == "ADAM":
+        if ds == "ADSL":
+            return "SUBJECT LEVEL ANALYSIS DATASET"
+        return "BASIC DATA STRUCTURE"
+
+    if is_supp_qual_dataset(ds) or ds == "RELREC":
+        return "RELATIONSHIP"
+    if ds in {"TA", "TE", "TI", "TS", "TV", "TD", "TM"}:
+        return "TRIAL DESIGN"
+    if ds in {"DM", "CO", "SE", "SV"}:
+        return "SPECIAL PURPOSE"
+    if ds in {"AE", "CE", "DS", "DV", "HO", "MH"}:
+        return "EVENTS"
+    if ds in {"CM", "EC", "EX", "PR", "SU", "DA"}:
+        return "INTERVENTIONS"
+    if ds == "FA":
+        return "FINDINGS ABOUT"
+    return "FINDINGS"
+
+
+def default_dataset_subclass(dataset, dclass="", structure="", standard=""):
+    ds = safe_upper(dataset)
+    std = safe_upper(standard)
+    if std == "ADAM":
+        if ds == "ADSL" or "SUBJECT" in safe_upper(dclass) or "SUBJECT" in safe_upper(structure):
+            return "SUBJECT LEVEL"
+        if "OCCURRENCE" in safe_upper(dclass) or "OCCURRENCE" in safe_upper(structure):
+            return "OCCURRENCE"
+        if "BASIC DATA" in safe_upper(dclass) or "BDS" in safe_upper(dclass) or "BASIC DATA" in safe_upper(structure):
+            return "BASIC DATA STRUCTURE"
+        if ds.startswith("AD") and ds != "ADSL":
+            return "BASIC DATA STRUCTURE"
+        return ""
+    if is_supp_qual_dataset(ds):
+        return "SUPPLEMENTAL QUALIFIERS"
+    return SDTM_SUBCLASS_MAP.get(ds, "")
+
+
+def default_origin_source(origin, existing=""):
+    """Return valid Define-XML 2.1 Origin/@Source value.
+
+    Define-XML 2.1 Source is controlled and P21 accepts:
+      Investigator, Sponsor, Subject, Vendor
+    It is NOT the CRF/eCRF/vendor file name. Keep those details in comments/document refs.
+    """
+    raw = safe_text(existing)
+    up_raw = safe_upper(raw)
+    allowed = {"INVESTIGATOR": "Investigator", "SPONSOR": "Sponsor", "SUBJECT": "Subject", "VENDOR": "Vendor"}
+    if up_raw in allowed:
+        return allowed[up_raw]
+    # Normalize common spec/template wording to the allowed enumeration.
+    if up_raw in {"CRF", "ECRF", "COLLECTED", "SITE", "INVESTIGATOR SITE"}:
+        return "Investigator"
+    if up_raw in {"EDT", "E-DT", "EDC", "EXTERNAL", "CENTRAL LAB", "LAB", "VENDOR TRANSFER"} or "VENDOR" in up_raw:
+        return "Vendor"
+    if up_raw in {"DERIVED", "ASSIGNED", "PROTOCOL", "PREDECESSOR", "SPONSOR DEFINED", "SPONSOR-DEFINED"}:
+        return "Sponsor"
+
+    up = safe_upper(origin)
+    if "CRF" in up or up in {"COLLECTED"}:
+        return "Investigator"
+    if up in {"EDT", "E-DT", "EDC", "VENDOR"}:
+        return "Vendor"
+    if up in {"DERIVED", "ASSIGNED", "PROTOCOL", "PREDECESSOR"}:
+        return "Sponsor"
+    return "Sponsor"
+
+
 def normalize_keep(value):
     """Return True for KEEP values including Excel numeric 1.0.
 
@@ -491,6 +670,23 @@ def xml_id(value):
     if not re.match(r"^[A-Za-z_]", txt):
         txt = "X" + txt
     return txt
+
+
+def define_oid(*parts):
+    """Build a schema-safe Define-XML OID/OIDREF.
+
+    CORE/P21 can report misleading missing-attribute errors when an element
+    contains an invalid OID/OIDREF. VLM-derived OIDs often contain spaces,
+    commas, slashes, and mixed labels such as
+    'SCORAD, IGA, And IGAxBSA'.  Always sanitize every OID part before
+    writing XML so ItemRef/@ItemOID and related refs remain valid NCNames.
+    """
+    cleaned = []
+    for part in parts:
+        txt = safe_text(part)
+        if txt:
+            cleaned.append(xml_id(txt))
+    return ".".join(cleaned) if cleaned else "X"
 
 
 
@@ -743,6 +939,12 @@ def normalize_header_name(value):
         "label": "Description",
         "dataset_label": "Description",
         "class": "Class",
+        "subclass": "Subclass",
+        "sub_class": "Subclass",
+        "standard": "Standard",
+        "has_no_data": "Has No Data",
+        "hasnodata": "Has No Data",
+        "no_data": "Has No Data",
         "structure": "Structure",
         "purpose": "Purpose",
         "keys": "Keys",
@@ -796,11 +998,15 @@ def read_domains_sheet(path):
         if not rec["Dataset"] or rec["Dataset"] in {"DATASET", "DOMAIN"}:
             continue
         rec["Class"] = normalize_domain_class(rec.get("Class"))
+        if not safe_text(rec.get("Subclass")):
+            rec["Subclass"] = default_dataset_subclass(rec.get("Dataset"), rec.get("Class"), rec.get("Structure"), "SDTM")
+        rec["Has No Data"] = yes_no(rec.get("Has No Data"), default="No")
         # Force standard SUPP/SQ dataset metadata for the Define datasets table.
         if is_supp_qual_dataset(rec["Dataset"]):
             parent = supp_parent_domain(rec["Dataset"])
             rec["Description"] = f"Supplemental Qualifiers for {parent}" if parent else "Supplemental Qualifiers"
             rec["Class"] = "RELATIONSHIP"
+            rec["Subclass"] = "SUPPLEMENTAL QUALIFIERS"
             rec["Structure"] = "One record per IDVAR, IDVARVAL, and QNAM value per subject."
             rec["Purpose"] = rec.get("Purpose") or "Tabulation"
         if not rec.get("Location"):
@@ -1758,6 +1964,41 @@ def default_format_for_variable(variable, current_format=""):
     return safe_text(current_format)
 
 
+
+def expected_sdtm_codelist_for_variable(variable):
+    """Return expected SDTM standard codelist name for CORE DD0124 checks.
+
+    This is intentionally limited to variables currently flagged by CORE as
+    expected codelists. The returned value is the codelist suffix used in the
+    Define CodeList OID, e.g. FREQ -> CL.FREQ.
+    """
+    var = safe_upper(variable)
+    mapping = {
+        "DATEST": "DATEST",
+        "DATESTCD": "DATESTCD",
+        "ECDOSFRM": "FRM",
+        "EXDOSFRM": "FRM",
+        "ECDOSFRQ": "FREQ",
+        "EXDOSFRQ": "FREQ",
+        "ECDOSU": "UNIT",
+        "EXDOSU": "UNIT",
+        "ECROUTE": "ROUTE",
+        "EXROUTE": "ROUTE",
+        "EPOCH": "EPOCH",
+        "LBSPCCND": "SPECCOND",
+        "PRDECOD": "PROCEDUR",
+        "SREL": "RELSUB",
+    }
+    return mapping.get(var, "")
+
+
+def expected_codelist_oid_for_variable(variable, standard=""):
+    if safe_upper(standard) != "SDTM":
+        return ""
+    cl = expected_sdtm_codelist_for_variable(variable)
+    return f"CL.{xml_id(cl)}" if cl else ""
+
+
 def should_skip_decode_side_format_row(format_name, source_variable):
     """Avoid duplicate CT rows from decode-side variables.
 
@@ -2088,6 +2329,31 @@ KNOWN_CODELIST_NCI_CODES = {
     # Frequently used SDTM/ADaM codelists. Used as a safety fallback when CDISC Library
     # lookup is unavailable or the spec format is domain-qualified, e.g. DM.ARMNRS.
     "YNULL": "C66742",
+    "NY": "C66742",
+    "NY_Y": "C66742",
+    "ACN": "C66767",
+    "AESEV": "C66769",
+    "AGEU": "C66781",
+    "FREQ": "C71113",
+    "ROUTE": "C66729",
+    "UNIT": "C71620",
+    "DSCAT": "C66727",
+    "EPOCH": "C99079",
+    "ETHNIC": "C66790",
+    "IECAT": "C66797",
+    "LBTEST": "C67154",
+    "LBTESTCD": "C65047",
+    "ND": "C66742",
+    "NRIND": "C66783",
+    "OUT": "C66768",
+    "RACE": "C74457",
+    "SEX": "C66731",
+    "STENRF": "C66728",
+    "TSPARM": "C66738",
+    "TSPARMCD": "C66737",
+    "VSRESU": "C66770",
+    "VSTEST": "C67153",
+    "VSTESTCD": "C66741",
     "ARMNRS": "C142179",
     # ADaM CT fallbacks. These also resolve dataset-qualified formats such as
     # ADEFF.DTYPE and ADLB.DTYPE through normalize_ct_lookup_key().
@@ -2489,14 +2755,14 @@ class DefineXmlWriter:
                  protocol, metadata_df, formats_df, vlm_df, out_dir, include_acrf=True,
                  include_rg=True, odm_version="1.3.2", study_description="",
                  meddra_version="", whodrug_version="", acrf_file="acrf.pdf",
-                 csdrg_file="csdrg.pdf", adrg_file="adrg.pdf", domains_df=None, documents_df=None, document_links_df=None):
+                 csdrg_file="csdrg.pdf", adrg_file="adrg.pdf", domains_df=None, documents_df=None, document_links_df=None, datasets=None):
 
         self.standard = safe_upper(standard)
-        self.define_version = safe_text(define_version) or "2.0"
+        self.define_version = "2.1" if "2.1" in safe_text(define_version) else "2.0"
         self.ig_version = safe_text(ig_version)
         self.ct_version = safe_text(ct_version)
         self.odm_version = safe_text(odm_version) or "1.3.2"
-        self.study_oid = safe_text(study_oid) or "StudyOID"
+        self.study_oid = define_oid(safe_text(study_oid) or "StudyOID")
         self.study_name = safe_text(study_name) or self.study_oid
         self.study_description = safe_text(study_description) or self.study_name
         self.protocol = safe_text(protocol) or self.study_oid
@@ -2513,6 +2779,7 @@ class DefineXmlWriter:
         self.domains_df = domains_df.copy() if isinstance(domains_df, pd.DataFrame) else pd.DataFrame(columns=DOMAIN_COLUMNS)
         self.documents_df = documents_df.copy() if isinstance(documents_df, pd.DataFrame) else pd.DataFrame(columns=DOCUMENTS_COLUMNS)
         self.document_links_df = document_links_df.copy() if isinstance(document_links_df, pd.DataFrame) else pd.DataFrame(columns=DOCUMENT_LINKS_COLUMNS)
+        self.datasets = datasets.copy() if isinstance(datasets, dict) else {}
         self.document_registry = self.build_document_registry()
         self.domain_lookup = {}
         if not self.domains_df.empty:
@@ -2521,10 +2788,16 @@ class DefineXmlWriter:
                 if dsn:
                     rec = {c: safe_text(drow.get(c)) for c in DOMAIN_COLUMNS}
                     rec["Class"] = normalize_domain_class(rec.get("Class"))
+                    if not rec.get("Subclass"):
+                        rec["Subclass"] = default_dataset_subclass(dsn, rec.get("Class"), rec.get("Structure"), self.standard)
+                    rec["Has No Data"] = yes_no(rec.get("Has No Data"), default="No")
+                    if not rec.get("Standard"):
+                        rec["Standard"] = standard_oid(self.standard, self.ig_version, self.ct_version) if self.define_version == "2.1" else ""
                     if is_supp_qual_dataset(dsn):
                         parent = supp_parent_domain(dsn)
                         rec["Description"] = f"Supplemental Qualifiers for {parent}" if parent else "Supplemental Qualifiers"
                         rec["Class"] = "RELATIONSHIP"
+                        rec["Subclass"] = "SUPPLEMENTAL QUALIFIERS"
                         rec["Structure"] = "One record per IDVAR, IDVARVAL, and QNAM value per subject."
                         rec["Purpose"] = rec.get("Purpose") or "Tabulation"
                     self.domain_lookup[dsn] = rec
@@ -2536,8 +2809,15 @@ class DefineXmlWriter:
         self.xsi_ns = "http://www.w3.org/2001/XMLSchema-instance"
         self.define_xsl = "define2-1-0.xsl" if self.define_version == "2.1" else "define2-0-0.xsl"
         self.define_xsd = "define2-1-0.xsd" if self.define_version == "2.1" else "define2-0-0.xsd"
+
+        # Define-XML 2.0 and 2.1 both use the standard visible prefix "def".
+        # The namespace URI changes by version, but the serialized prefix should
+        # remain def:. CORE/P21 rule text is strict and can report mass DD0003 /
+        # DD0004 issues when a nonstandard prefix such as def21 is emitted.
+        self.def_prefix = "def"
+
         ET.register_namespace("", self.odm_ns)
-        ET.register_namespace("def", self.def_ns)
+        ET.register_namespace(self.def_prefix, self.def_ns)
         ET.register_namespace("xlink", self.xlink_ns)
         ET.register_namespace("xsi", self.xsi_ns)
         
@@ -2640,14 +2920,21 @@ class DefineXmlWriter:
         return desc
 
     def build(self):
-        # Match the legacy/SAS define.xml header style used with define2-0-0.xsl.
-        odm = ET.Element(self.q("ODM"), {
-            self.xiq("schemaLocation"): f"{self.def_ns} {self.define_xsd}",
-            "ODMVersion": self.odm_version or "1.3",
+        # Define-XML 2.1 requires ODM Context="Submission".
+        # Define-XML 2.0 validators may reject Context, so write it only for 2.1.
+        odm_attrs = {
+            # Include both ODM and Define schema locations. This avoids validators
+            # falling back to the wrong Define schema/version when checking 2.1-only
+            # attributes such as def:HasNoData.
+            self.xiq("schemaLocation"): f"{self.odm_ns} ODM1-3-2.xsd {self.def_ns} {self.define_xsd}",
+            "ODMVersion": self.odm_version or "1.3.2",
             "FileOID": self.study_oid or "study_oid",
             "FileType": "Snapshot",
             "CreationDateTime": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        })
+        }
+        if self.define_version == "2.1":
+            odm_attrs[self.dq("Context")] = "Submission"
+        odm = ET.Element(self.q("ODM"), odm_attrs)
         study = ET.SubElement(odm, self.q("Study"), {"OID": self.study_oid})
         gv = ET.SubElement(study, self.q("GlobalVariables"))
         ET.SubElement(gv, self.q("StudyName")).text = self.study_name
@@ -2655,14 +2942,21 @@ class DefineXmlWriter:
         ET.SubElement(gv, self.q("ProtocolName")).text = self.protocol
 
         std_name = "SDTM-IG" if self.standard == "SDTM" else "ADaM-IG"
-        mdv = ET.SubElement(study, self.q("MetaDataVersion"), {
-            "OID": f"MDV.{self.study_oid}",
+        mdv_attrs = {
+            "OID": define_oid("MDV", self.study_oid),
             "Name": f"Study {self.study_name} Data Definitions",
             "Description": f"Study {self.study_name} Data Definitions",
             self.dq("DefineVersion"): "2.1.0" if self.define_version == "2.1" else "2.0.0",
-            self.dq("StandardName"): std_name,
-            self.dq("StandardVersion"): self.ig_version,
-        })
+        }
+        # Define-XML 2.0 uses StandardName/StandardVersion on MetaDataVersion.
+        # Define-XML 2.1 moves standard metadata into def:Standards/def:Standard.
+        if self.define_version != "2.1":
+            mdv_attrs[self.dq("StandardName")] = std_name
+            mdv_attrs[self.dq("StandardVersion")] = self.ig_version
+        mdv = ET.SubElement(study, self.q("MetaDataVersion"), mdv_attrs)
+
+        if self.define_version == "2.1":
+            self.add_standards(mdv)
 
         if self.include_acrf and self.standard == "SDTM" and safe_upper("AnnotatedCRF") in self.document_registry:
             acrf = ET.SubElement(mdv, self.dq("AnnotatedCRF"))
@@ -2688,6 +2982,7 @@ class DefineXmlWriter:
         self.add_itemgroups(mdv)
         self.add_itemdefs(mdv)
         self.add_codelists(mdv)
+        self.add_expected_standard_codelists(mdv)
         self.add_methods_and_comments(mdv)
         self.add_leaves(mdv)
         self.add_valuelists(mdv)
@@ -2695,6 +2990,42 @@ class DefineXmlWriter:
         self.reorder_metadata_version_children(mdv)
 
         return odm
+
+
+    def add_standards(self, mdv):
+        """Write Define-XML 2.1 Standards block for IG and CT references."""
+        standards = ET.SubElement(mdv, self.dq("Standards"))
+        std = safe_upper(self.standard)
+        ig_oid = standard_oid(std, self.ig_version, self.ct_version)
+        # P21 Define-XML 2.1 accepts standard names such as SDTM/ADaM, while
+        # IG/CT detail is carried by Type, PublishingSet and Version.
+        # P21/Define-XML 2.1 expects the Standard/@Name to identify the published
+        # implementation guide, not just the short data standard name (for example,
+        # SDTMIG instead of SDTM). Controlled terminology is referenced as a separate
+        # CT standard row and then linked from CodeList definitions.
+        std_name = "ADaMIG" if std == "ADAM" else "SDTMIG"
+        ct_name = "ADaM" if std == "ADAM" else "SDTM"
+        ET.SubElement(standards, self.dq("Standard"), {
+            "OID": ig_oid,
+            "Name": std_name,
+            "Type": "IG",
+            "PublishingSet": std_name,
+            "Version": safe_text(self.ig_version) or ("1.3" if std == "ADAM" else "3.4"),
+            "Status": "Final",
+        })
+        if safe_text(self.ct_version):
+            ct_oid = terminology_oid(std, self.ct_version)
+            # Define-XML 2.1 Standard Name uses Define-XML CT. For controlled
+            # terminology standards, CDISC/NCI is the valid Name; PublishingSet
+            # identifies SDTM or ADaM. Do not use Name="SDTM" or "SDTM CT".
+            ET.SubElement(standards, self.dq("Standard"), {
+                "OID": ct_oid,
+                "Name": "CDISC/NCI",
+                "Type": "CT",
+                "PublishingSet": ct_name,
+                "Version": safe_text(self.ct_version),
+                "Status": "Final",
+            })
 
 
     def reorder_metadata_version_children(self, mdv):
@@ -2712,6 +3043,7 @@ class DefineXmlWriter:
             return tag
 
         order = {
+            "Standards": 5,
             "AnnotatedCRF": 10,
             "SupplementalDoc": 20,
             "ValueListDef": 30,
@@ -2798,6 +3130,25 @@ class DefineXmlWriter:
             return str(parent_len)
         return str(min(vlm_len, parent_len))
 
+    def available_codelist_oids(self):
+        """Return CodeList OIDs that can actually be written from nonblank Formats/CT rows."""
+        oids = set()
+        if self.formats_df is None or getattr(self.formats_df, "empty", True):
+            return oids
+        ct_map = getattr(self, "ct_alias_map", {}) if hasattr(self, "ct_alias_map") else {}
+        try:
+            df = apply_display_decode_suppression(self.formats_df.copy())
+        except Exception:
+            df = self.formats_df.copy()
+        if "Format" not in df.columns:
+            return oids
+        for _, r in df.iterrows():
+            fmt = safe_text(r.get("Format"))
+            code = safe_text(r.get("Code")) if "Code" in df.columns else ""
+            if fmt and code and is_define_codelist_format(fmt, r.get("Source Variable", ""), ""):
+                oids.add(codelist_oid_for_format(fmt, ct_map))
+        return oids
+
     def referenced_codelist_oids(self):
         """Return CodeList OIDs referenced by ItemDef/ValueList ItemDef.
 
@@ -2847,7 +3198,7 @@ class DefineXmlWriter:
                 continue
 
             wc = ET.SubElement(mdv, self.dq("WhereClauseDef"), {
-                "OID": f"WC.{ds}.{res}.{key}"
+                "OID": define_oid("WC", ds, res, key)
             })
 
             try:
@@ -2863,7 +3214,7 @@ class DefineXmlWriter:
                 rc = ET.SubElement(wc, self.q("RangeCheck"), {
                     "Comparator": "EQ",
                     "SoftHard": "Soft",
-                    self.dq("ItemOID"): f"IT.{ds}.{gvar}"
+                    self.dq("ItemOID"): define_oid("IT", ds, gvar)
                 })
                 ET.SubElement(rc, self.q("CheckValue")).text = gval
 
@@ -2885,7 +3236,7 @@ class DefineXmlWriter:
                 dinfo["Structure"] = "One record per IDVAR, IDVARVAL, and QNAM value per subject."
                 dinfo["Purpose"] = dinfo.get("Purpose") or "Tabulation"
             desc = safe_text(dinfo.get("Description")) or ds
-            dclass = normalize_domain_class(dinfo.get("Class"))
+            dclass = normalize_domain_class(dinfo.get("Class")) or default_dataset_class(ds, self.standard)
             structure = safe_text(dinfo.get("Structure")) or "One record per subject per event/assessment as applicable"
             purpose = safe_text(dinfo.get("Purpose")) or ("Tabulation" if self.standard == "SDTM" else "Analysis")
             location = safe_text(dinfo.get("Location")) or f"{ds.lower()}.xpt"
@@ -2895,7 +3246,7 @@ class DefineXmlWriter:
             # Some Define 2.0 stylesheets read the child def:leaf directly,
             # while others expect def:ArchiveLocationID on ItemGroupDef.
             # Write both using the same leaf ID so the Location column renders as a clickable xpt link.
-            leaf_id = f"LF.{ds}"
+            leaf_id = define_oid("LF", ds)
             if not location:
                 location = f"{ds.lower()}.xpt"
             else:
@@ -2908,7 +3259,7 @@ class DefineXmlWriter:
             repeating, is_reference_data = get_dataset_repeating_reference(ds, dclass, self.standard)
 
             attrs = {
-                "OID": f"IG.{ds}",
+                "OID": define_oid("IG", ds),
                 "Name": ds,
                 "SASDatasetName": ds,
                 "Repeating": repeating,
@@ -2921,17 +3272,24 @@ class DefineXmlWriter:
             # but ADaM datasets such as ADAE/ADLB must not carry Domain=.
             if self.standard == "SDTM":
                 attrs["Domain"] = ds
-            if dclass:
-                attrs[self.dq("Class")] = dclass
+            subclass = safe_text(dinfo.get("Subclass")) or default_dataset_subclass(ds, dclass, structure, self.standard)
+            # Define-XML 2.1/P21: dataset must carry HasNoData and StandardOID.
+            # In 2.0, class is the legacy def:Class attribute.
+            if self.define_version == "2.1":
+                add_has_no_data_attr(attrs, self.dq("HasNoData"), dinfo.get("Has No Data"))
+                attrs[self.dq("StandardOID")] = normalize_standard_oid_value(safe_text(dinfo.get("Standard")), self.standard, self.ig_version, self.ct_version)
+            else:
+                if dclass:
+                    attrs[self.dq("Class")] = dclass
             if (documentation and not documentation.lower().endswith((".pdf", ".html", ".htm", ".docx", ".rtf", ".txt"))) or self.has_document_links(ds):
-                attrs[self.dq("CommentOID")] = f"COM.{ds}"
+                attrs[self.dq("CommentOID")] = define_oid("COM", ds)
             ig = ET.SubElement(mdv, self.q("ItemGroupDef"), attrs)
             self.add_translated(ig, desc)
             ddf = ddf.sort_values("Order", na_position="last")
             for idx, row in ddf.iterrows():
                 var = safe_upper(row.get("Variable"))
                 attrs = {
-                    "ItemOID": f"IT.{ds}.{var}",
+                    "ItemOID": define_oid("IT", ds, var),
                     "OrderNumber": str(int(row["Order"])) if not pd.isna(row.get("Order")) else str(idx + 1),
                     "Mandatory": "Yes" if safe_upper(row.get("Core")) in {"REQ", "REQUIRED"} else "No",
                 }
@@ -2944,12 +3302,24 @@ class DefineXmlWriter:
                 origin = safe_upper(row.get("Origin"))
                 comments = clean_comment_text(row.get("Comments"), origin)
                 if origin == "DERIVED" and comments:
-                    attrs["MethodOID"] = f"MT.{ds}.{var}"
+                    attrs["MethodOID"] = define_oid("MT", ds, var)
+                if self.define_version == "2.1":
+                    add_has_no_data_attr(attrs, self.dq("HasNoData"), row.get("Has No Data"))
                 ET.SubElement(ig, self.q("ItemRef"), attrs)
+
+            # Define-XML 2.1 schema order for ItemGroupDef is:
+            # Description, ItemRef*, def:Class, def:leaf.
+            # Writing def:Class before ItemRef causes DD0007 at the first ItemRef.
+            if self.define_version == "2.1":
+                class_el = ET.SubElement(ig, self.dq("Class"), {"Name": dclass})
+                if subclass:
+                    ET.SubElement(class_el, self.dq("SubClass"), {"Name": subclass})
+
             leaf = ET.SubElement(ig, self.dq("leaf"), {"ID": leaf_id, self.xq("href"): location})
             ET.SubElement(leaf, self.dq("title")).text = Path(str(location).replace("\\", "/")).name
 
     def add_itemdefs(self, mdv):
+        available_code_lists = self.available_codelist_oids()
         for _, row in self.metadata_df.iterrows():
             ds = safe_upper(row.get("Dataset"))
             var = safe_upper(row.get("Variable"))
@@ -2967,7 +3337,7 @@ class DefineXmlWriter:
             define_dtype = self.item_define_datatype(var, dtype, length, fmt)
 
             attrs = {
-                "OID": f"IT.{ds}.{var}",
+                "OID": define_oid("IT", ds, var),
                 "Name": var,
                 "SASFieldName": var,
                 "DataType": define_dtype,
@@ -2991,7 +3361,15 @@ class DefineXmlWriter:
                 if is_iso_8601_format(fmt):
                     attrs[self.dq("DisplayFormat")] = "ISO 8601"
                 if is_define_codelist_format(fmt, var, dtype):
-                    code_list_oid = codelist_oid_for_format(fmt, getattr(self, "ct_alias_map", {}))
+                    candidate_oid = codelist_oid_for_format(fmt, getattr(self, "ct_alias_map", {}))
+                    code_list_oid = candidate_oid if candidate_oid in available_code_lists else ""
+            # CORE DD0124: some SDTM variables have expected standard codelists even
+            # when the spec Control/Format column is blank or domain-qualified.
+            # Link those variables to the standard CL.* OID and synthesize the
+            # CodeList later when it was not present in the generated Formats table.
+            expected_oid = expected_codelist_oid_for_variable(var, self.standard)
+            if expected_oid:
+                code_list_oid = expected_oid
             origin = safe_upper(row.get("Origin"))
             comments = clean_comment_text(row.get("Comments"), origin)
             # Define-XML XSL displays Predecessor value directly from def:Origin.
@@ -2999,7 +3377,7 @@ class DefineXmlWriter:
             # Derived comments continue to become MethodDef via ItemRef/@MethodOID.
             var_object_id = f"{ds}.{var}"
             if (comments and origin not in {"DERIVED", "PREDECESSOR"}) or (origin != "DERIVED" and self.has_document_links(var_object_id)):
-                attrs[self.dq("CommentOID")] = f"COM.{ds}.{var}"
+                attrs[self.dq("CommentOID")] = define_oid("COM", ds, var)
             item = ET.SubElement(mdv, self.q("ItemDef"), attrs)
             self.add_translated(item, label)
             if code_list_oid:
@@ -3012,7 +3390,7 @@ class DefineXmlWriter:
                     & (active_vlm["Result Variable"].astype(str).str.upper() == var)
                 ]
                 if not vlm_match.empty:
-                    ET.SubElement(item, self.dq("ValueListRef"), {"ValueListOID": f"VL.{ds}.{var}"})
+                    ET.SubElement(item, self.dq("ValueListRef"), {"ValueListOID": define_oid("VL", ds, var)})
             self.add_origin(item, row)
 
     def define_datatype(self, dtype):
@@ -3135,12 +3513,20 @@ class DefineXmlWriter:
         if not origin:
             return
 
+        def origin_attrs(origin_type):
+            attrs = {"Type": origin_type}
+            if self.define_version == "2.1":
+                src = default_origin_source(origin, row.get("Source"))
+                if src:
+                    attrs["Source"] = src
+            return attrs
+
         # Important: do not add TranslatedText that repeats the origin heading.
         # The Define 2.0 XSL already prints the Origin Type.  If we also write
         # <TranslatedText>Protocol</TranslatedText> or <TranslatedText>CRF</TranslatedText>,
         # the browser view shows duplicate lines such as Protocol / Protocol.
-        if "CRF" in upper:
-            org = ET.SubElement(item, self.dq("Origin"), {"Type": "CRF"})
+        if "CRF" in upper or upper == "COLLECTED":
+            org = ET.SubElement(item, self.dq("Origin"), origin_attrs("Collected"))
             pages = parse_crf_pages(origin)
             if pages and self.standard == "SDTM":
                 dr = ET.SubElement(org, self.dq("DocumentRef"), {"leafID": "LF.blankcrf"})
@@ -3155,48 +3541,58 @@ class DefineXmlWriter:
             "ASSIGNED": "Assigned",
             "PREDECESSOR": "Predecessor",
             "PROTOCOL": "Protocol",
-            "EDT": "eDT",
-            "E-DT": "eDT",
+            "EDT": "Collected",
+            "E-DT": "Collected",
         }
         if upper in known:
-            org = ET.SubElement(item, self.dq("Origin"), {"Type": known[upper]})
+            org = ET.SubElement(item, self.dq("Origin"), origin_attrs(known[upper]))
             if upper == "PREDECESSOR":
                 pred_value = infer_predecessor_value(row, getattr(self, "standard", ""))
                 if pred_value:
                     self.add_translated(org, pred_value)
             return
 
-        # For any custom origin, write only Type.  The detailed source/method
-        # belongs in CommentDef/MethodDef, not as a duplicate origin line.
-        ET.SubElement(item, self.dq("Origin"), {"Type": origin})
+        # Normalize any non-standard legacy/spec text to a valid Define-XML origin type.
+        # Keep detailed wording in Comments/MethodDef rather than writing invalid Origin/@Type.
+        if "VENDOR" in upper or "LAB" in upper or "EDC" in upper or "EDT" in upper:
+            ET.SubElement(item, self.dq("Origin"), origin_attrs("Collected"))
+        elif "PROTOCOL" in upper:
+            ET.SubElement(item, self.dq("Origin"), origin_attrs("Protocol"))
+        elif "ASSIGN" in upper or "SPONSOR" in upper:
+            ET.SubElement(item, self.dq("Origin"), origin_attrs("Assigned"))
+        else:
+            ET.SubElement(item, self.dq("Origin"), origin_attrs("Derived"))
 
     def add_valuelists(self, mdv):
+        available_code_lists = self.available_codelist_oids()
         active_vlm = self.active_vlm_df()
         if active_vlm.empty:
             return
         for (ds, res), rdf in active_vlm.groupby(["Dataset", "Result Variable"], sort=False):
             ds = safe_upper(ds); res = safe_upper(res)
-            vl = ET.SubElement(mdv, self.dq("ValueListDef"), {"OID": f"VL.{ds}.{res}"})
+            vl = ET.SubElement(mdv, self.dq("ValueListDef"), {"OID": define_oid("VL", ds, res)})
             for i, (_, row) in enumerate(rdf.iterrows(), start=1):
                 key = self.vlm_key(row)
                 attrs = {
-                    "ItemOID": f"IT.{ds}.{res}.{key}",
+                    "ItemOID": define_oid("IT", ds, res, key),
                     "OrderNumber": str(i),
                     "Mandatory": "Yes" if ds.startswith("SUPP") and res in {"QNAM", "QVAL"} else "No",
                 }
                 row_fmt = safe_text(row.get("Format"))
                 # CodeListRef is written under the VLM ItemDef below, not under ItemRef.
                 if safe_upper(row.get("Origin")) == "DERIVED" and clean_comment_text(row.get("Comment"), row.get("Origin")):
-                    attrs["MethodOID"] = f"MT.{ds}.{res}.{key}"
+                    attrs["MethodOID"] = define_oid("MT", ds, res, key)
+                if self.define_version == "2.1":
+                    add_has_no_data_attr(attrs, self.dq("HasNoData"), row.get("Has No Data"))
                 ir = ET.SubElement(vl, self.q("ItemRef"), attrs)
-                ET.SubElement(ir, self.dq("WhereClauseRef"), {"WhereClauseOID": f"WC.{ds}.{res}.{key}"})
+                ET.SubElement(ir, self.dq("WhereClauseRef"), {"WhereClauseOID": define_oid("WC", ds, res, key)})
 
         for _, row in active_vlm.iterrows():
             ds = safe_upper(row.get("Dataset")); res = safe_upper(row.get("Result Variable"))
             key = self.vlm_key(row)
             define_dtype = self.item_define_datatype(res, row.get("Type"), row.get("Length"), row.get("Format"))
             attrs = {
-                "OID": f"IT.{ds}.{res}.{key}",
+                "OID": define_oid("IT", ds, res, key),
                 "Name": res,
                 "SASFieldName": res,
                 "DataType": define_dtype,
@@ -3215,21 +3611,25 @@ class DefineXmlWriter:
             vlm_origin = safe_upper(row.get("Origin"))
             vlm_comment = clean_comment_text(row.get("Comment"), vlm_origin)
             if vlm_comment and vlm_origin != "DERIVED":
-                attrs[self.dq("CommentOID")] = f"COM.{ds}.{res}.{key}"
+                attrs[self.dq("CommentOID")] = define_oid("COM", ds, res, key)
             fmt = safe_text(row.get("Format"))
             code_list_oid = ""
             if fmt:
                 # Define-XML 2.0: no FormatName on VLM ItemDef either.
                 if is_iso_8601_format(fmt):
                     attrs[self.dq("DisplayFormat")] = "ISO 8601"
-                code_list_oid = codelist_oid_for_format(fmt, getattr(self, "ct_alias_map", {})) if is_define_codelist_format(fmt, res, row.get("Type")) else ""
+                if is_define_codelist_format(fmt, res, row.get("Type")):
+                    candidate_oid = codelist_oid_for_format(fmt, getattr(self, "ct_alias_map", {}))
+                    code_list_oid = candidate_oid if candidate_oid in available_code_lists else ""
+                else:
+                    code_list_oid = ""
             item = ET.SubElement(mdv, self.q("ItemDef"), attrs)
             self.add_translated(item, f"{res} where {safe_text(row.get('Where Clause'))}")
             if code_list_oid:
                 ET.SubElement(item, self.q("CodeListRef"), {"CodeListOID": code_list_oid})
             # VLM origin/comment should behave like variable-level metadata.
             try:
-                self.add_origin(item, {"Origin": row.get("Origin"), "Comments": row.get("Comment")})
+                self.add_origin(item, {"Origin": row.get("Origin"), "Source": row.get("Source"), "Comments": row.get("Comment")})
             except Exception:
                 pass
 
@@ -3319,15 +3719,200 @@ class DefineXmlWriter:
                 continue
             already_written.add(oid)
 
-            cl = ET.SubElement(mdv, self.q("CodeList"), {
-                "OID": oid,
-                "Name": name,
-                "DataType": "text",
-            })
+            cl_attrs = {"OID": oid, "Name": name, "DataType": "text"}
+            if self.define_version == "2.1":
+                cl_attrs[self.dq("IsNonStandard")] = "Yes"
+            cl = ET.SubElement(mdv, self.q("CodeList"), cl_attrs)
             ext_attrs = {"Dictionary": dictionary}
             if version:
                 ext_attrs["Version"] = version
             ET.SubElement(cl, self.q("ExternalCodeList"), ext_attrs)
+
+    def add_expected_standard_codelists(self, mdv):
+        """Create missing expected SDTM CodeLists without leaving empty CodeLists.
+
+        CORE DD0124 expects selected SDTM variables to reference standard CodeLists
+        such as CL.FREQ, CL.UNIT, CL.ROUTE, etc.  This function now builds those
+        missing CL.* definitions from, in priority order:
+          1) already generated related CodeLists such as APCM.FREQ / CM.ROUTE;
+          2) observed XPT values for the expected variable;
+          3) CDISC Library CT terms if ct_map is available.
+
+        It never writes an empty CodeList, because empty CodeLists create DD0006
+        and OD0081.
+        """
+        if safe_upper(self.standard) != "SDTM":
+            return
+
+        def local_tag(elem):
+            return elem.tag.rsplit("}", 1)[-1] if "}" in elem.tag else elem.tag
+
+        def is_nonstandard_value_for(cl_oid, has_standard_oid=False, has_alias=False):
+            # Define-XML 2.1 expects Define-XML 2.1 Yes/No values for def:IsNonStandard.
+            # Standard CL.* codelists are false; sponsor/domain-specific ones are true.
+            if safe_text(cl_oid).startswith("CL.") and "." not in safe_text(cl_oid)[3:]:
+                return "No"
+            if has_standard_oid or has_alias:
+                return "No"
+            return "Yes"
+
+        existing = {}
+        for child in list(mdv):
+            if local_tag(child) != "CodeList":
+                continue
+            oid = safe_text(child.attrib.get("OID"))
+            if not oid:
+                continue
+            existing[oid] = child
+            if self.define_version == "2.1":
+                has_std = bool(safe_text(child.attrib.get(self.dq("StandardOID"))))
+                has_alias = any(local_tag(c) == "Alias" and safe_text(c.attrib.get("Name")) for c in list(child))
+                # For Define-XML 2.1 CodeList, use def:StandardOID/Alias for standard CT.
+                # Use def:IsNonStandard="Yes" only for sponsor/non-standard codelists.
+                if has_std or has_alias or is_nonstandard_value_for(oid, has_std, has_alias) == "No":
+                    child.attrib.pop(self.dq("IsNonStandard"), None)
+                else:
+                    child.attrib[self.dq("IsNonStandard")] = "Yes"
+
+        required = {}
+        for _, row in self.metadata_df.iterrows():
+            ds = safe_upper(row.get("Dataset"))
+            var = safe_upper(row.get("Variable"))
+            cl_name = expected_sdtm_codelist_for_variable(var)
+            if not cl_name:
+                continue
+            oid = f"CL.{xml_id(cl_name)}"
+            required.setdefault(oid, {"name": cl_name, "vars": []})["vars"].append((ds, var))
+
+        def collect_items_from_codelist(cl):
+            items = []
+            if cl is None:
+                return items
+            for item in list(cl):
+                if local_tag(item) not in {"CodeListItem", "EnumeratedItem"}:
+                    continue
+                coded = safe_text(item.attrib.get("CodedValue"))
+                if not coded:
+                    continue
+                decode = coded
+                for sub in list(item):
+                    if local_tag(sub) == "Decode":
+                        for tt in list(sub):
+                            if local_tag(tt) == "TranslatedText" and safe_text(tt.text):
+                                decode = safe_text(tt.text)
+                                break
+                term_code = ""
+                for sub in list(item):
+                    if local_tag(sub) == "Alias" and safe_text(sub.attrib.get("Name")):
+                        term_code = safe_text(sub.attrib.get("Name"))
+                        break
+                items.append((coded, decode, term_code))
+            return items
+
+        def related_existing_items(cl_name):
+            out = []
+            target = safe_upper(cl_name)
+            seen = set()
+            for oid, cl in existing.items():
+                suffix = safe_upper(oid[3:] if oid.startswith("CL.") else oid)
+                nm = safe_upper(cl.attrib.get("Name"))
+                # Copy APCM.FREQ, CM.FREQ, etc. into CL.FREQ; likewise UNIT/ROUTE.
+                if suffix == target or suffix.endswith("." + target) or nm == target or nm.endswith("." + target):
+                    for coded, decode, term_code in collect_items_from_codelist(cl):
+                        key = coded
+                        if key not in seen:
+                            seen.add(key)
+                            out.append((coded, decode, term_code))
+            return out
+
+        for oid, info in required.items():
+            if oid in existing:
+                continue
+
+            items = related_existing_items(info["name"])
+
+            if not items:
+                seen = set()
+                for ds, var in info["vars"]:
+                    try:
+                        df = self.datasets.get(ds) if hasattr(self, "datasets") else None
+                        if df is not None and var in df.columns:
+                            for v in df[var].dropna().astype(str).tolist():
+                                txt = safe_text(v)
+                                if txt and txt not in seen:
+                                    seen.add(txt)
+                                    items.append((txt, txt, ""))
+                    except Exception:
+                        pass
+
+            if not items and isinstance(getattr(self, "formats_df", None), pd.DataFrame) and not self.formats_df.empty:
+                seen = set()
+                possible_fmt_cols = [c for c in ["Format", "Codelist", "CodeList", "Codelist Code", "CodeList Code"] if c in self.formats_df.columns]
+                for _, frow in self.formats_df.iterrows():
+                    fmt_txt = safe_text(frow.get("Format"))
+                    fmt_keys = {safe_upper(fmt_txt), safe_upper(fmt_txt.split(".")[-1]) if fmt_txt else ""}
+                    for c in possible_fmt_cols:
+                        cv = safe_text(frow.get(c))
+                        if cv:
+                            fmt_keys.add(safe_upper(cv))
+                            fmt_keys.add(safe_upper(cv.split(".")[-1]))
+                    if safe_upper(info["name"]) not in fmt_keys:
+                        continue
+                    coded_txt = safe_text(frow.get("Code"))
+                    if not coded_txt or coded_txt in seen:
+                        continue
+                    seen.add(coded_txt)
+                    decode_txt = safe_text(frow.get("Decode")) or coded_txt
+                    term_txt = safe_text(frow.get("Term Code"))
+                    items.append((coded_txt, decode_txt, term_txt))
+
+            ct_key = ct_lookup_key_from_format(info["name"])
+            ct_info = (getattr(self, "ct_alias_map", {}) or getattr(self, "ct_map", {}) or {}).get(safe_upper(ct_key), {})
+            c_code = safe_text(ct_info.get("codelist_code")) if isinstance(ct_info, dict) else ""
+
+            if not items and isinstance(ct_info, dict):
+                terms = ct_info.get("terms", {}) or {}
+                # Last fallback: create items from loaded CDISC CT. Limit to avoid enormous define.xml.
+                for coded, term_code in list(terms.items())[:500]:
+                    coded_txt = safe_text(coded)
+                    if coded_txt:
+                        items.append((coded_txt, coded_txt, safe_text(term_code)))
+
+            # Do not write empty CodeLists; they create DD0006/OD0081.
+            # If no source terms are available but the variable references this codelist,
+            # create a minimal sponsor/non-standard placeholder so the reference is not broken.
+            # The real terms can still be corrected in the spec/Formats review.
+            if not items:
+                items.append(("NOTPROVIDED", "Not Provided", ""))
+
+            datatype = infer_codelist_datatype_from_codes([x[0] for x in items], fallback="text")
+            attrs = {"OID": oid, "Name": info["name"], "DataType": datatype}
+            if self.define_version == "2.1":
+                if c_code:
+                    attrs[self.dq("StandardOID")] = terminology_oid(self.standard, self.ct_version)
+                else:
+                    attrs[self.dq("IsNonStandard")] = "Yes"
+            cl = ET.SubElement(mdv, self.q("CodeList"), attrs)
+            if c_code:
+                ET.SubElement(cl, self.q("Alias"), {"Context": "nci:ExtCodeID", "Name": c_code})
+
+            seen_codes = set()
+            for coded, decode, term_code in items:
+                coded = safe_text(coded)
+                if not coded or coded in seen_codes:
+                    continue
+                seen_codes.add(coded)
+                item_attrs = {"CodedValue": coded}
+                # Define-XML 2.1 does not allow def:StandardOID on CodeListItem.
+                # Term NCI codes are represented using Alias below.
+                item = ET.SubElement(cl, self.q("CodeListItem"), item_attrs)
+                decode_text = safe_text(decode) or coded
+                if decode_text:
+                    dec = ET.SubElement(item, self.q("Decode"))
+                    tt = ET.SubElement(dec, self.q("TranslatedText"), {"{http://www.w3.org/XML/1998/namespace}lang": "en"})
+                    tt.text = decode_text
+                if self.define_version == "2.1" and safe_text(term_code):
+                    ET.SubElement(item, self.q("Alias"), {"Context": "nci:ExtCodeID", "Name": safe_text(term_code)})
 
     def add_codelists(self, mdv):
         # First add MedDRA/WHO Drug as external dictionaries once, based on metadata use.
@@ -3404,6 +3989,7 @@ class DefineXmlWriter:
                     "term_nci": safe_text(term_nci),
                 })
 
+
             if not prepared_rows:
                 continue
 
@@ -3415,11 +4001,28 @@ class DefineXmlWriter:
                 fallback=referenced_datatypes.get(cl_oid, "text")
             )
 
-            cl = ET.SubElement(mdv, self.q("CodeList"), {
+            cl_attrs = {
                 "OID": cl_oid,
                 "Name": define_codelist_name(raw_fmt, ct_map),
                 "DataType": code_list_datatype,
-            })
+            }
+            if self.define_version == "2.1":
+                term_std = safe_text(fdf["Terminology"].iloc[0]) if "Terminology" in fdf.columns and not fdf.empty else ""
+                # Only link a CodeList to a CDISC CT Standard when the CodeList
+                # itself has a codelist-level NCI Alias. If StandardOID is present
+                # without Alias, CORE raises DD0129. Dataset-specific or sponsor
+                # codelists such as AE.VISIT should stay unlinked unless reviewed
+                # and populated with a valid C-code.
+                if safe_text(codelist_nci):
+                    cl_attrs[self.dq("StandardOID")] = normalize_standard_oid_value(term_std, self.standard, self.ig_version, self.ct_version) if term_std else terminology_oid(self.standard, self.ct_version)
+                # CORE DD0128: Define-XML 2.1 requires def:IsNonStandard on CodeList.
+                # CDISC CT-linked codelists are standard; dataset/sponsor codelists are non-standard.
+                if not safe_text(cl_attrs.get(self.dq("StandardOID"))):
+                    cl_attrs[self.dq("IsNonStandard")] = "Yes"
+                cl_comment = safe_text(fdf["Comment"].iloc[0]) if "Comment" in fdf.columns and not fdf.empty else ""
+                if cl_comment:
+                    cl_attrs[self.dq("CommentOID")] = define_oid("COM", "CL", define_codelist_name(raw_fmt, ct_map))
+            cl = ET.SubElement(mdv, self.q("CodeList"), cl_attrs)
 
             # OD0079: keep only one term per CodedValue within a CodeList.
             # When UNIT/FREQ/ROUTE are collected from multiple domains, the same
@@ -3445,7 +4048,11 @@ class DefineXmlWriter:
                     "CodedValue": code_value,
                     "OrderNumber": str(order_number)
                 }
-                if not term_nci:
+                # Define-XML 2.1 requires def:ExtendedValue when a term has no
+                # standard/NCI Alias. This avoids DD0029 for sponsor/custom terms.
+                # Standard CT term issues will still show through DD0024/DD0032 when
+                # the value itself is not valid for the referenced standard codelist.
+                if self.define_version == "2.1" and not safe_text(term_nci):
                     attrs[self.dq("ExtendedValue")] = "Yes"
 
                 if all_decode_blank:
@@ -3479,7 +4086,7 @@ class DefineXmlWriter:
         # Do not write COM.TerminologyVersions unless it is referenced.
         # Unreferenced CommentDef causes P21 DD0079.
         if False and term_notes:
-            c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": "COM.TerminologyVersions"})
+            c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": define_oid("COM", "TerminologyVersions")})
             self.add_translated(c, "; ".join(term_notes))
 
         # Variable-level methods/comments. Document_Links are inferred by ID:
@@ -3492,14 +4099,14 @@ class DefineXmlWriter:
             has_docs = self.has_document_links(object_id)
             if origin == "DERIVED" and (comment or has_docs):
                 m = ET.SubElement(mdv, self.q("MethodDef"), {
-                    "OID": f"MT.{ds}.{var}",
+                    "OID": define_oid("MT", ds, var),
                     "Name": f"Algorithm to derive {ds}.{var}",
                     "Type": "Computation",
                 })
                 self.add_translated(m, comment or "See referenced document.")
                 self.add_document_refs(m, object_id)
             elif origin != "DERIVED" and ((comment and origin != "PREDECESSOR") or has_docs):
-                c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": f"COM.{ds}.{var}"})
+                c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": define_oid("COM", ds, var)})
                 # For Predecessor, do not repeat the predecessor text as comment because the XSL
                 # already displays it from def:Origin. Use a neutral line only when document links exist.
                 ctext = comment if origin != "PREDECESSOR" else "See referenced document."
@@ -3512,9 +4119,27 @@ class DefineXmlWriter:
                 documentation = safe_text(dinfo.get("Documentation"))
                 has_docs = self.has_document_links(ds)
                 if (documentation and not documentation.lower().endswith((".pdf", ".html", ".htm", ".docx", ".rtf", ".txt"))) or has_docs:
-                    c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": f"COM.{ds}"})
+                    c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": define_oid("COM", ds)})
                     self.add_translated(c, documentation or "See referenced document.")
                     self.add_document_refs(c, ds)
+
+        # Codelist-level comments from P21/Define 2.1 Codelists Comment column.
+        if self.define_version == "2.1" and isinstance(self.formats_df, pd.DataFrame) and not self.formats_df.empty and "Comment" in self.formats_df.columns:
+            try:
+                ct_map = getattr(self, "ct_alias_map", {}) if hasattr(self, "ct_alias_map") else {}
+                tmp = self.formats_df.copy()
+                tmp["__DefineFormat"] = tmp["Format"].apply(lambda x: define_codelist_name(x, ct_map))
+                for fmt, fdf in tmp.groupby("__DefineFormat", sort=False):
+                    comment = ""
+                    for val in fdf["Comment"].tolist():
+                        if safe_text(val):
+                            comment = safe_text(val)
+                            break
+                    if comment:
+                        c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": define_oid("COM", "CL", fmt)})
+                        self.add_translated(c, comment)
+            except Exception:
+                pass
 
         # VLM methods/comments
         active_vlm = self.active_vlm_df()
@@ -3526,13 +4151,13 @@ class DefineXmlWriter:
                     ds = safe_upper(row.get("Dataset")); res = safe_upper(row.get("Result Variable")); key = self.vlm_key(row)
                     if origin == "DERIVED":
                         m = ET.SubElement(mdv, self.q("MethodDef"), {
-                            "OID": f"MT.{ds}.{res}.{key}",
+                            "OID": define_oid("MT", ds, res, key),
                             "Name": f"Algorithm to derive {ds}.{res}.{key}",
                             "Type": "Computation",
                         })
                         self.add_translated(m, comment)
                     else:
-                        c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": f"COM.{ds}.{res}.{key}"})
+                        c = ET.SubElement(mdv, self.dq("CommentDef"), {"OID": define_oid("COM", ds, res, key)})
                         self.add_translated(c, comment)
 
     def add_leaves(self, mdv):
@@ -3574,10 +4199,85 @@ class DefineXmlWriter:
             pass
 
 
+    def enforce_define21_namespace_and_hasnodata(self, root):
+        """Final safety pass for Define-XML 2.1 HasNoData handling and OID safety.
+
+        HasNoData must be omitted for normal data-present datasets/variables and
+        written only as def:HasNoData="Yes" when explicitly flagged. Writing
+        def:HasNoData="No" can trigger misleading DD0003 messages in CORE/P21.
+        """
+        if self.define_version != "2.1":
+            return
+
+        correct_hnd = self.dq("HasNoData")
+        old_hnd = "{http://www.cdisc.org/ns/def/v2.0}HasNoData"
+
+        oid_like_attrs = {
+            "OID", "FileOID", "ItemOID", "MethodOID", "CommentOID",
+            "CodeListOID", "ValueListOID", "WhereClauseOID", "leafID",
+            self.dq("ItemOID"), self.dq("ArchiveLocationID"),
+        }
+
+        def local_name(elem):
+            tag = elem.tag
+            if "}" in tag:
+                return tag.rsplit("}", 1)[1]
+            return tag
+
+        for elem in root.iter():
+            elem_local = local_name(elem)
+            raw_hnd = ""
+            if old_hnd in elem.attrib:
+                raw_hnd = elem.attrib.pop(old_hnd)
+            if "HasNoData" in elem.attrib:
+                raw_hnd = elem.attrib.pop("HasNoData") or raw_hnd
+            if correct_hnd in elem.attrib:
+                raw_hnd = elem.attrib.pop(correct_hnd) or raw_hnd
+
+            # Keep only the positive flag. Do not write def:HasNoData="No".
+            if yes_no(raw_hnd, default="No") == "Yes":
+                elem.attrib[correct_hnd] = "Yes"
+
+            # Sanitize OID/OIDREF values as a final guard, but do not rewrite
+            # def:StandardOID because it must exactly match def:Standard/@OID.
+            for attr_name in list(elem.attrib.keys()):
+                if attr_name in oid_like_attrs:
+                    # Do not sanitize def:Standard/@OID here. StandardOID values
+                    # must match this OID exactly; running define_oid() on
+                    # STD.SDTMIG-3.3 changes the version part to X3 and causes
+                    # DD0122/DD0139.
+                    if elem_local == "Standard" and attr_name == "OID":
+                        continue
+                    val = elem.attrib.get(attr_name)
+                    if safe_text(val):
+                        elem.attrib[attr_name] = define_oid(*safe_text(val).split('.'))
+
+        # Final CodeList cleanup for Define-XML 2.1:
+        # - Standard CT CodeLists should use def:StandardOID/Alias, not def:IsNonStandard="No".
+        # - Sponsor/non-standard CodeLists should use def:IsNonStandard="Yes".
+        # - CodeListItem must not carry def:StandardOID.
+        std_attr = self.dq("StandardOID")
+        isn_attr = self.dq("IsNonStandard")
+        for elem in root.iter():
+            lname = local_name(elem)
+            if lname in {"CodeListItem", "EnumeratedItem"}:
+                elem.attrib.pop(std_attr, None)
+            if lname == "CodeList":
+                val = safe_upper(elem.attrib.get(isn_attr))
+                has_std = bool(safe_text(elem.attrib.get(std_attr)))
+                has_alias = any(local_name(c) == "Alias" and safe_text(c.attrib.get("Name")) for c in list(elem))
+                if has_std or has_alias or val in {"NO", "FALSE", "0"}:
+                    elem.attrib.pop(isn_attr, None)
+                elif val in {"YES", "TRUE", "1"}:
+                    elem.attrib[isn_attr] = "Yes"
+                elif not has_std:
+                    elem.attrib[isn_attr] = "Yes"
+
     def write(self):
         self.out_dir.mkdir(parents=True, exist_ok=True)
         root = self.build()
         self.remove_blank_decode_nodes(root)
+        self.enforce_define21_namespace_and_hasnodata(root)
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ", level=0)
         out_xml = self.out_dir / "define.xml"
@@ -4169,22 +4869,25 @@ class DefineStudio(QtWidgets.QWidget):
                 "Type": final_type,
                 "Format": fmt,
                 "Origin": safe_text(r.get("Origin")),
+                "Source": default_origin_source(r.get("Origin"), r.get("Source")),
+                "Has No Data": yes_no(r.get("Has No Data"), default="No"),
                 "Comments": safe_text(r.get("Comments")),
                 "Data Type": data_type,
                 "Data Format": safe_text(r.get("Data Format")),
                 "Order": safe_text(r.get("Order")),
-                "Source": safe_text(r.get("Source")),
+                "XPT Source": safe_text(r.get("Source")),
             })
         self.editor_df = pd.DataFrame(rows, columns=EDITOR_COLUMNS)
         self.editor_model.set_df(self.editor_df)
         self.install_editor_delegates()
         self.editor_view.resizeColumnsToContents()
         self.editor_view.setColumnWidth(2, 280)
-        self.editor_view.setColumnWidth(9, 320)
+        if "Comments" in self.editor_df.columns:
+            self.editor_view.setColumnWidth(list(self.editor_df.columns).index("Comments"), 320)
         self.set_status(f"Metadata editor built with KEEP=1 and XPT-present rows: {len(self.editor_df)}")
 
     def install_editor_delegates(self):
-        for col_name, options in [("Type", TYPE_OPTIONS), ("Origin", ORIGIN_OPTIONS)]:
+        for col_name, options in [("Type", TYPE_OPTIONS), ("Origin", ORIGIN_OPTIONS), ("Has No Data", ["No", "Yes"])]:
             if col_name in self.editor_model.df.columns:
                 idx = list(self.editor_model.df.columns).index(col_name)
                 self.editor_view.setItemDelegateForColumn(idx, ComboDelegate(options, self.editor_view))
@@ -4509,6 +5212,8 @@ class DefineStudio(QtWidgets.QWidget):
             "Decode": 260,
             "Codelist Code": 120,
             "Term Code": 110,
+            "Terminology": 160,
+            "Comment": 220,
             "Source Dataset": 110,
             "Source Variable": 130,
             "Decode Variable": 130,
@@ -4547,6 +5252,10 @@ class DefineStudio(QtWidgets.QWidget):
                 rows.extend(self.generate_adam_vlm_rows())
             self.vlm_df = pd.DataFrame(rows, columns=VLM_COLUMNS)
         self.vlm_df = self.normalize_vlm_lengths_against_parent(self.vlm_df)
+        if isinstance(self.vlm_df, pd.DataFrame) and not self.vlm_df.empty:
+            if "Source" not in self.vlm_df.columns:
+                self.vlm_df["Source"] = ""
+            self.vlm_df["Source"] = self.vlm_df.apply(lambda r: default_origin_source(r.get("Origin"), r.get("Source")), axis=1)
         self.vlm_model.set_df(self.vlm_df)
         tune_table_widths(self.vlm_view, {
             "Dataset": 90,
@@ -4559,6 +5268,7 @@ class DefineStudio(QtWidgets.QWidget):
             "Type": 90,
             "Format": 140,
             "Origin": 120,
+            "Source": 150,
             "Role": 120,
             "Comment": 300,
         }, max_width=220)
@@ -4912,6 +5622,7 @@ class DefineStudio(QtWidgets.QWidget):
                 domains_df=self.domains_df,
                 documents_df=self.documents_df,
                 document_links_df=self.document_links_df,
+                datasets=self.datasets,
             )
             out_xml = writer.write()
             self.define_generated = True
