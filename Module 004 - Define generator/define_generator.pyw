@@ -47,7 +47,7 @@
 #                    - Generate Define-XML
 #
 #                  Configuration:
-#                    - This tool depends on define_config.json.
+#                    - This tool depends on cdisc_api_key.json.
 #                    - Study-level details and file locations are maintained in the config JSON.
 #                    - The config JSON controls items such as:
 #                        * Study name / study OID
@@ -155,9 +155,9 @@ code = ""  # global fallback to prevent legacy bare-code NameError
 TEMP_DIR = r"C:\TEMP"
 DOWNLOAD_PATH = r"C:\TEMP\define_studio_spec.xlsx"
 GET_SPREADSHEET_SCRIPT = r"P:\BSP_LocalDev\_GLIB\harm_bsp_v_1_0\macros\report\api\get_spreadsheet.py"
-DEFAULT_SITE_NAME = "BSP - Team Mani"
+DEFAULT_SITE_NAME = "BSP Demo Project"
 DEFAULT_SPEC_FILE_PATH = "BSP/SDTM_Specs/CSR/SDTM_Specification.xlsx"
-DEFAULT_CONFIG_PATH = str(Path(__file__).resolve().parent / "define_config.json")
+DEFAULT_CONFIG_PATH = str(Path(__file__).resolve().parent / "cdisc_api_key.json")
 
 SPEC_COLUMNS = [
     "Dataset", "Variable", "Label", "ID Var", "Keep", "Type", "Len",
@@ -325,25 +325,214 @@ TYPE_OPTIONS = ["char", "num", "date", "datetime", "float"]
 ORIGIN_OPTIONS = ["CRF", "Assigned", "Derived", "Protocol", "Predecessor", "eDT", ""]
 
 THEME = {
-    "app_bg": "#f3f7fd",
-    "header": "#cfe7ff",
-    "header_text": "#103760",
-    "subtitle": "#315f8f",
+    "app_bg": "#eef6ff",
+    "header": "#8ee8ff",
+    "header_text": "#082f5f",
+    "subtitle": "#0f5fa8",
     "panel": "#ffffff",
-    "border": "#b7cde8",
-    "table_header": "#d8ebff",
+    "border": "#7db7f0",
+    "table_header": "#c4e2ff",
     "status": "#fff8dc",
     "status_running": "#d9ecff",
     "status_done": "#e7f7e7",
     "status_error": "#ffe6e6",
     "status_info": "#fff8dc",
-    "button": "#4d8ef7",
-    "button_hover": "#2f75dd",
+    "button": "#2563eb",
+    "button_hover": "#1d4ed8",
     "locked_bg": "#f1f3f6",
     "editable_bg": "#fffde7",
     "warn_bg": "#fff4cc",
     "err_bg": "#ffe9e9",
 }
+
+
+# ================================================================================================
+# GUI version dropdown defaults / helpers
+# ================================================================================================
+
+DEFAULT_STANDARD_OPTIONS = ["SDTM", "ADaM"]
+DEFAULT_DEFINE_VERSION_OPTIONS = ["2.0", "2.1"]
+DEFAULT_ODM_VERSION_OPTIONS = ["1.3.2", "1.3.1"]
+DEFAULT_SDTM_IG_OPTIONS = ["3.4", "3.3", "3.2", "3.1", "3.0"]
+DEFAULT_ADAM_IG_OPTIONS = ["1.3", "1.2", "1.1", "1.0"]
+DEFAULT_SDTM_CT_OPTIONS = [
+    "2026-03-27", "2025-12-19", "2025-09-26", "2025-06-27", "2025-03-28",
+    "2024-12-20", "2024-09-27", "2024-06-28", "2024-03-29",
+    "2023-12-15", "2023-09-29", "2023-06-30", "2023-03-31",
+]
+DEFAULT_ADAM_CT_OPTIONS = [
+    "2026-03-27", "2025-09-26", "2025-03-28", "2024-09-27",
+    "2024-03-29", "2023-06-30", "2023-03-31", "2022-06-24",
+    "2021-12-17", "2020-11-06",
+]
+DEFAULT_CT_VERSION_OPTIONS = DEFAULT_SDTM_CT_OPTIONS
+DEFAULT_MEDDRA_OPTIONS = ["28.0", "27.1", "27.0", "26.1", "26.0", "25.1", "25.0", "24.1", "24.0"]
+DEFAULT_WHODRUG_OPTIONS = ["B3MAR2025", "B3SEP2024", "B3MAR2024", "B3SEP2023", "B3MAR2023"]
+
+
+def _version_sort_key(value):
+    txt = safe_text(value)
+    parts = []
+    for token in re.findall(r"\d+", txt):
+        try:
+            parts.append(int(token))
+        except Exception:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _clean_ig_versions(values, standard):
+    """Keep only IG versions that belong to the selected standard.
+
+    CDISC Library product payload can include broad product-family values such
+    as 3 or 1.0. Do not let those leak into the wrong standard dropdown.
+    """
+    std = safe_upper(standard)
+    out = []
+    seen = set()
+    for v in values or []:
+        txt = safe_text(v)
+        if not txt:
+            continue
+        if std == "ADAM":
+            ok = bool(re.fullmatch(r"1\.\d+", txt))
+        else:
+            ok = bool(re.fullmatch(r"3\.\d+", txt))
+        if ok and txt not in seen:
+            out.append(txt)
+            seen.add(txt)
+    return sorted(out, key=_version_sort_key, reverse=True)
+
+
+def _clean_ct_versions(values):
+    out = []
+    seen = set()
+    for v in values or []:
+        txt = parse_ct_effective_date(v) or safe_text(v)
+        if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", txt) and txt not in seen:
+            out.append(txt)
+            seen.add(txt)
+    return sorted(out, reverse=True)
+
+
+def make_editable_combo(options=None, current="", placeholder=""):
+    combo = QtWidgets.QComboBox()
+    combo.setEditable(True)
+    combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+    combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    combo.setMinimumContentsLength(8)
+    combo.setMinimumHeight(28)
+    combo.setStyleSheet("""
+        QComboBox {
+            background: white;
+            border: 1px solid #b7cde8;
+            border-radius: 8px;
+            padding: 3px 28px 3px 8px;
+            color: #12395f;
+        }
+        QComboBox:focus {
+            border: 1px solid #4d8ef7;
+        }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 24px;
+            border-left: 0px;
+            border-top-right-radius: 8px;
+            border-bottom-right-radius: 8px;
+            background: transparent;
+        }
+        QComboBox::down-arrow {
+            width: 0px;
+            height: 0px;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 6px solid #315f8f;
+            margin-right: 8px;
+        }
+        QComboBox QAbstractItemView {
+            border: 1px solid #b7cde8;
+            selection-background-color: #d8ebff;
+            background: white;
+        }
+    """)
+    for item in options or []:
+        if safe_text(item):
+            combo.addItem(safe_text(item))
+    if safe_text(current):
+        set_combo_text(combo, current)
+    if placeholder:
+        try:
+            combo.lineEdit().setPlaceholderText(placeholder)
+        except Exception:
+            pass
+    return combo
+
+
+def combo_text(widget):
+    if isinstance(widget, QtWidgets.QComboBox):
+        return safe_text(widget.currentText())
+    if hasattr(widget, "text"):
+        return safe_text(widget.text())
+    return safe_text(widget)
+
+
+def set_combo_text(widget, value):
+    value = safe_text(value)
+    if isinstance(widget, QtWidgets.QComboBox):
+        idx = widget.findText(value, QtCore.Qt.MatchFixedString)
+        if idx < 0 and value:
+            widget.insertItem(0, value)
+            idx = 0
+        if idx >= 0:
+            widget.setCurrentIndex(idx)
+        elif widget.isEditable():
+            widget.setEditText(value)
+    elif hasattr(widget, "setText"):
+        widget.setText(value)
+
+
+def refill_combo(combo, values, keep_current=True):
+    if not isinstance(combo, QtWidgets.QComboBox):
+        return
+    current = combo_text(combo) if keep_current else ""
+    seen = set()
+    cleaned = []
+    for v in values or []:
+        txt = safe_text(v)
+        if txt and txt not in seen:
+            cleaned.append(txt)
+            seen.add(txt)
+    if current and current not in seen:
+        cleaned.insert(0, current)
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItems(cleaned)
+    combo.blockSignals(False)
+    if current:
+        set_combo_text(combo, current)
+
+
+def refill_combo_strict(combo, values):
+    """Refill a dropdown and preserve current value only when it belongs to the new list."""
+    if not isinstance(combo, QtWidgets.QComboBox):
+        return
+    current = combo_text(combo)
+    seen = set()
+    cleaned = []
+    for v in values or []:
+        txt = safe_text(v)
+        if txt and txt not in seen:
+            cleaned.append(txt)
+            seen.add(txt)
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItems(cleaned)
+    combo.blockSignals(False)
+    if current in seen:
+        set_combo_text(combo, current)
+    elif cleaned:
+        combo.setCurrentIndex(0)
 
 
 # ================================================================================================
@@ -1275,6 +1464,9 @@ def companion_decode_var(variable):
         return "ACTARM"
     if var == "ETCD":
         return "ELEMENT"
+    if var == "DATESTCD":
+        # Drug Accountability Test Code must use DATEST as the decode/name variable.
+        return "DATEST"
     if var.endswith("TESTCD"):
         return var[:-6] + "TEST"
     if var.endswith("PARMCD"):
@@ -2307,6 +2499,87 @@ def apply_test_decode_suppression(formats_df):
     return apply_display_decode_suppression(formats_df)
 
 
+
+def enforce_datest_pair_codelists(formats_df, datasets, ct_map=None):
+    """Ensure DA DATESTCD and DATEST remain two complete, separate codelists.
+
+    DATESTCD is the coded test-code codelist and uses DATEST only as its Decode text.
+    DATEST is the test-name/decode codelist and must still be generated as its own
+    codelist.  Do not merge DATESTCD into DATEST, and do not redirect DATEST to
+    DATESTCD.  This function adds missing rows from any loaded XPT dataset that
+    contains both DATESTCD and DATEST.
+    """
+    base = formats_df.copy() if isinstance(formats_df, pd.DataFrame) else pd.DataFrame(columns=FORMAT_COLUMNS)
+    rows = []
+    if not isinstance(datasets, dict):
+        datasets = {}
+    ct_map = ct_map or {}
+
+    for ds, df in datasets.items():
+        try:
+            if df is None or getattr(df, "empty", True):
+                continue
+            cols_upper = {safe_upper(c): c for c in df.columns}
+            if "DATESTCD" not in cols_upper or "DATEST" not in cols_upper:
+                continue
+            cd_col = cols_upper["DATESTCD"]
+            name_col = cols_upper["DATEST"]
+            tmp = df[[cd_col, name_col]].drop_duplicates().copy()
+            tmp = tmp[tmp[cd_col].apply(lambda x: safe_text(x) != "")]
+            tmp = tmp.sort_values([cd_col, name_col])
+            for _, tr in tmp.iterrows():
+                cd = sas_best_text(tr.get(cd_col))
+                name = sas_best_text(tr.get(name_col)) or cd
+                if not cd:
+                    continue
+                info_cd = get_ct_info_generic(ct_map, "DATESTCD")
+                info_nm = get_ct_info_generic(ct_map, "DATEST")
+
+                rows.append({
+                    "Order": "",
+                    "Format": "DATESTCD",
+                    "Code": cd,
+                    "Decode": name,
+                    "Codelist Code": safe_text(info_cd.get("codelist_code", "")) or known_codelist_nci_code("DATESTCD"),
+                    "Term Code": get_ct_term_code_generic(info_cd, cd) or known_term_nci_code("DATESTCD", cd),
+                    "Source Dataset": safe_upper(ds),
+                    "Source Variable": "DATESTCD",
+                    "Decode Variable": "DATEST",
+                    "Sort Value": cd,
+                })
+                if name:
+                    rows.append({
+                        "Order": "",
+                        "Format": "DATEST",
+                        "Code": name,
+                        "Decode": name,
+                        "Codelist Code": safe_text(info_nm.get("codelist_code", "")) or known_codelist_nci_code("DATEST"),
+                        "Term Code": get_ct_term_code_generic(info_nm, name) or known_term_nci_code("DATEST", name),
+                        "Source Dataset": safe_upper(ds),
+                        "Source Variable": "DATEST",
+                        "Decode Variable": "",
+                        "Sort Value": name,
+                    })
+        except Exception:
+            continue
+
+    if rows:
+        extra = pd.DataFrame(rows, columns=FORMAT_COLUMNS)
+        base = pd.concat([base, extra], ignore_index=True)
+
+    if not base.empty:
+        # For DATESTCD, always preserve DATEST as Decode text when available.
+        # For DATEST, keep it as an independent self-decode codelist.
+        mask = base["Format"].astype(str).str.upper().isin(["DATESTCD", "DATEST"]) if "Format" in base.columns else []
+        if len(mask) == len(base):
+            base.loc[mask & (base["Format"].astype(str).str.upper() == "DATEST") & (base["Decode"].astype(str).str.strip() == ""), "Decode"] = base.loc[mask & (base["Format"].astype(str).str.upper() == "DATEST") & (base["Decode"].astype(str).str.strip() == ""), "Code"]
+        base = base.drop_duplicates(subset=["Format", "Code", "Decode"], keep="first").copy()
+        base["_sort"] = base["Sort Value"].apply(sort_key_mixed) if "Sort Value" in base.columns else ""
+        base = base.sort_values(["Format", "_sort", "Code", "Decode"]).drop(columns=["_sort"], errors="ignore")
+        base["Order"] = base.groupby("Format").cumcount() + 1
+    return base
+
+
 def is_qnam_qlabel_pair(format_name, source_variable="", decode_variable=""):
     """True when QNAM should use QLABEL as decode text."""
     fmt = safe_upper(format_name)
@@ -2334,8 +2607,14 @@ KNOWN_CODELIST_NCI_CODES = {
     "ACN": "C66767",
     "AESEV": "C66769",
     "AGEU": "C66781",
+    "DATESTCD": "C78732",
+    "DATEST": "C78731",
     "FREQ": "C71113",
+    "FRM": "C66726",
+    "PROCEDUR": "C101858",
+    "RELSUB": "C100130",
     "ROUTE": "C66729",
+    "SPECCOND": "C78733",
     "UNIT": "C71620",
     "DSCAT": "C66727",
     "EPOCH": "C99079",
@@ -2405,6 +2684,50 @@ KNOWN_TERM_NCI_CODES = {
         "REQUIRES PROHIBITED MEDICATION": "C191339",
         "RECOVERY": "C25746",
     },
+    # SDTM Drug Accountability Test Code / Name - DATESTCD / DATEST
+    # DATESTCD and DATEST are paired codelists. DATESTCD uses DATEST as the decode/name variable;
+    # DATEST itself remains the decode/label codelist and is not replaced by DATESTCD.
+    "DATESTCD": {
+        "DISPAMT": "C78721",
+        "RETAMT": "C78722",
+        "LOSTAMT": "C189430",
+        "EXPREAMT": "C202343",
+        "PREPAMT": "C170562",
+        "REMAMT": "C170563",
+    },
+    "DATEST": {
+        "Dispensed Amount": "C78721",
+        "Returned Amount": "C78722",
+        "Lost Amount": "C189430",
+        "Expected Remaining Amount": "C202343",
+        "Prepared Amount": "C170562",
+        "Remaining Amount": "C170563",
+    },
+    # SDTM Dosage Form - FRM
+    "FRM": {
+        "CAPSULE": "C25158",
+    },
+    # SDTM Specimen Condition - SPECCOND
+    "SPECCOND": {
+        "CLOTTED": "C78724",
+        "HEMOLIZED": "C70720",
+        "HEMOLYZED": "C70720",
+        "LIPEMIC": "C70715",
+        "FROZEN": "C70717",
+        "ROOM TEMPERATURE": "C70719",
+        "CALCIFIED": "C78723",
+        "AUTOLIZED": "C78725",
+        "ICTERIC": "C98744",
+    },
+    # SDTM Relationship to Subject - RELSUB
+    "RELSUB": {
+        "MOTHER": "C25189",
+        "MOTHER, BIOLOGICAL": "C96580",
+        "FATHER": "C25174",
+        "PARENT": "C42709",
+        "CHILD": "C150886",
+    },
+
     # ADaM Derivation Type (DTYPE), codelist C81224. Keep submission-value
     # matching case-sensitive to avoid hiding casing problems.
     "DTYPE": {
@@ -3513,20 +3836,24 @@ class DefineXmlWriter:
         if not origin:
             return
 
+        def origin_type_for(collected_21="Collected", collected_20="CRF"):
+            """Return valid Origin/@Type for selected Define-XML version."""
+            return collected_21 if self.define_version == "2.1" else collected_20
+
         def origin_attrs(origin_type):
             attrs = {"Type": origin_type}
+            # Define-XML 2.1 uses Type=Collected plus Source.
+            # Define-XML 2.0 uses CRF/eDT directly and does not allow Source.
             if self.define_version == "2.1":
                 src = default_origin_source(origin, row.get("Source"))
                 if src:
                     attrs["Source"] = src
             return attrs
 
-        # Important: do not add TranslatedText that repeats the origin heading.
-        # The Define 2.0 XSL already prints the Origin Type.  If we also write
-        # <TranslatedText>Protocol</TranslatedText> or <TranslatedText>CRF</TranslatedText>,
-        # the browser view shows duplicate lines such as Protocol / Protocol.
+        # Define-XML 2.0 valid origin types include CRF/eDT/Derived/Assigned/Protocol/Predecessor.
+        # Define-XML 2.1 replaces CRF/eDT style collection with Type=Collected + Source.
         if "CRF" in upper or upper == "COLLECTED":
-            org = ET.SubElement(item, self.dq("Origin"), origin_attrs("Collected"))
+            org = ET.SubElement(item, self.dq("Origin"), origin_attrs(origin_type_for("Collected", "CRF")))
             pages = parse_crf_pages(origin)
             if pages and self.standard == "SDTM":
                 dr = ET.SubElement(org, self.dq("DocumentRef"), {"leafID": "LF.blankcrf"})
@@ -3541,8 +3868,9 @@ class DefineXmlWriter:
             "ASSIGNED": "Assigned",
             "PREDECESSOR": "Predecessor",
             "PROTOCOL": "Protocol",
-            "EDT": "Collected",
-            "E-DT": "Collected",
+            "EDT": origin_type_for("Collected", "eDT"),
+            "E-DT": origin_type_for("Collected", "eDT"),
+            "EDC": origin_type_for("Collected", "eDT"),
         }
         if upper in known:
             org = ET.SubElement(item, self.dq("Origin"), origin_attrs(known[upper]))
@@ -3555,7 +3883,7 @@ class DefineXmlWriter:
         # Normalize any non-standard legacy/spec text to a valid Define-XML origin type.
         # Keep detailed wording in Comments/MethodDef rather than writing invalid Origin/@Type.
         if "VENDOR" in upper or "LAB" in upper or "EDC" in upper or "EDT" in upper:
-            ET.SubElement(item, self.dq("Origin"), origin_attrs("Collected"))
+            ET.SubElement(item, self.dq("Origin"), origin_attrs(origin_type_for("Collected", "eDT")))
         elif "PROTOCOL" in upper:
             ET.SubElement(item, self.dq("Origin"), origin_attrs("Protocol"))
         elif "ASSIGN" in upper or "SPONSOR" in upper:
@@ -3903,7 +4231,8 @@ class DefineXmlWriter:
                     continue
                 seen_codes.add(coded)
                 item_attrs = {"CodedValue": coded}
-                # Define-XML 2.1 does not allow def:StandardOID on CodeListItem.
+                if not safe_text(term_code):
+                    item_attrs[self.dq("ExtendedValue")] = "Yes"
                 # Term NCI codes are represented using Alias below.
                 item = ET.SubElement(cl, self.q("CodeListItem"), item_attrs)
                 decode_text = safe_text(decode) or coded
@@ -3911,7 +4240,7 @@ class DefineXmlWriter:
                     dec = ET.SubElement(item, self.q("Decode"))
                     tt = ET.SubElement(dec, self.q("TranslatedText"), {"{http://www.w3.org/XML/1998/namespace}lang": "en"})
                     tt.text = decode_text
-                if self.define_version == "2.1" and safe_text(term_code):
+                if safe_text(term_code):
                     ET.SubElement(item, self.q("Alias"), {"Context": "nci:ExtCodeID", "Name": safe_text(term_code)})
 
     def add_codelists(self, mdv):
@@ -4048,11 +4377,11 @@ class DefineXmlWriter:
                     "CodedValue": code_value,
                     "OrderNumber": str(order_number)
                 }
-                # Define-XML 2.1 requires def:ExtendedValue when a term has no
+                # Define-XML 2.0 and 2.1 require def:ExtendedValue when a term has no
                 # standard/NCI Alias. This avoids DD0029 for sponsor/custom terms.
                 # Standard CT term issues will still show through DD0024/DD0032 when
                 # the value itself is not valid for the referenced standard codelist.
-                if self.define_version == "2.1" and not safe_text(term_nci):
+                if not safe_text(term_nci):
                     attrs[self.dq("ExtendedValue")] = "Yes"
 
                 if all_decode_blank:
@@ -4252,6 +4581,44 @@ class DefineXmlWriter:
                     if safe_text(val):
                         elem.attrib[attr_name] = define_oid(*safe_text(val).split('.'))
 
+        # Final CodeList NCI/ExtendedValue post-fix for both Define-XML 2.0 and 2.1.
+        # Some CDISC Library/API runs can leave CodeList-level aliases blank even when
+        # the codelist is a known CDISC CT list, especially for dataset-qualified
+        # formats or codelists generated from review rows. Add a conservative fallback
+        # here immediately before writing XML.
+        ext_attr = self.dq("ExtendedValue")
+        for cl in root.iter():
+            if local_name(cl) != "CodeList":
+                continue
+
+            cl_name = safe_text(cl.attrib.get("Name"))
+            cl_oid = safe_text(cl.attrib.get("OID"))
+            cl_key = normalize_ct_lookup_key(cl_name or cl_oid.replace("CL.", ""))
+            if not cl_key and cl_oid.upper().startswith("CL."):
+                cl_key = normalize_ct_lookup_key(cl_oid[3:])
+
+            # Add missing codelist-level NCI Alias from known fallback map.
+            cl_code = known_codelist_nci_code(cl_key)
+            has_cl_alias = any(
+                local_name(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                for c in list(cl)
+            )
+            if cl_code and not has_cl_alias:
+                add_nci_alias(cl, cl_code, self.q)
+
+            # For any term without NCI Alias, mark it as ExtendedValue. This prevents
+            # empty/missing term-code conditions from becoming DD0029 and also makes
+            # custom values explicit in Define-XML 2.0/2.1.
+            for item in list(cl):
+                if local_name(item) not in {"CodeListItem", "EnumeratedItem"}:
+                    continue
+                has_item_alias = any(
+                    local_name(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                    for c in list(item)
+                )
+                if not has_item_alias:
+                    item.attrib[ext_attr] = "Yes"
+
         # Final CodeList cleanup for Define-XML 2.1:
         # - Standard CT CodeLists should use def:StandardOID/Alias, not def:IsNonStandard="No".
         # - Sponsor/non-standard CodeLists should use def:IsNonStandard="Yes".
@@ -4273,11 +4640,70 @@ class DefineXmlWriter:
                 elif not has_std:
                     elem.attrib[isn_attr] = "Yes"
 
+
+    def enforce_codelist_nci_extended_all_versions(self, root):
+        """Final CodeList Alias / ExtendedValue safety pass for Define 2.0 and 2.1.
+
+        The previous cleanup was inside the Define 2.1-only namespace routine, so
+        Define 2.0 outputs could still miss codelist/term NCI aliases.  Run this
+        independently for every Define version immediately before writing XML.
+        """
+        def lname(elem):
+            tag = elem.tag
+            return tag.rsplit("}", 1)[1] if "}" in tag else tag
+
+        ext_attr = self.dq("ExtendedValue")
+
+        for cl in root.iter():
+            if lname(cl) != "CodeList":
+                continue
+
+            cl_name = safe_text(cl.attrib.get("Name"))
+            cl_oid = safe_text(cl.attrib.get("OID"))
+            cl_key = normalize_ct_lookup_key(cl_name)
+            if not cl_key and safe_upper(cl_oid).startswith("CL."):
+                cl_key = normalize_ct_lookup_key(cl_oid[3:])
+            if not cl_key:
+                cl_key = normalize_ct_lookup_key(cl_oid.replace("CL.", ""))
+
+            # CodeList-level NCI alias: fixes DD0031 for standard codelists when
+            # CDISC Library/API lookup did not populate Codelist Code.
+            cl_code = known_codelist_nci_code(cl_key)
+            has_cl_alias = any(
+                lname(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                for c in list(cl)
+            )
+            if cl_code and not has_cl_alias:
+                add_nci_alias(cl, cl_code, self.q)
+
+            # Term-level handling: first try a known term NCI code. If unavailable,
+            # mark the term as extended/custom so Define 2.0/2.1 has a valid reason
+            # for no NCI term alias.
+            for item in list(cl):
+                if lname(item) not in {"CodeListItem", "EnumeratedItem"}:
+                    continue
+
+                coded_value = safe_text(item.attrib.get("CodedValue"))
+                has_item_alias = any(
+                    lname(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                    for c in list(item)
+                )
+                if has_item_alias:
+                    continue
+
+                term_code = known_term_nci_code(cl_key, coded_value)
+                if term_code:
+                    add_nci_alias(item, term_code, self.q)
+                    item.attrib.pop(ext_attr, None)
+                else:
+                    item.attrib[ext_attr] = "Yes"
+
     def write(self):
         self.out_dir.mkdir(parents=True, exist_ok=True)
         root = self.build()
         self.remove_blank_decode_nodes(root)
         self.enforce_define21_namespace_and_hasnodata(root)
+        self.enforce_codelist_nci_extended_all_versions(root)
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ", level=0)
         out_xml = self.out_dir / "define.xml"
@@ -4317,6 +4743,7 @@ class DefineStudio(QtWidgets.QWidget):
         self.spec_vlm_df = pd.DataFrame(columns=VLM_COLUMNS)
         self.validation_df = pd.DataFrame()
         self.cdisc_api_key = ""
+        self.cdisc_secondary_key = ""
         self.ct_alias_map = {}
         self.spec_model = None
         self.dataset_metadata_model = None
@@ -4329,9 +4756,9 @@ class DefineStudio(QtWidgets.QWidget):
         self.build_ui()
         self.set_workflow_state("initial")
 
-        # JSON-only mode: automatically load define_config.json from script folder.
+        # JSON-only mode: automatically load cdisc_api_key.json from script folder.
         try:
-            self.load_config()
+            self.load_json_config()
         except Exception:
             pass
         self.apply_style()
@@ -4345,8 +4772,8 @@ class DefineStudio(QtWidgets.QWidget):
         header.setAlignment(QtCore.Qt.AlignCenter)
         header.setStyleSheet("""
             QLabel {
-                color: black; background: #bfe9f7; padding: 10px 0 8px 0; border-radius: 16px;
-                font-family: 'Times New Roman'; font-size: 20pt; font-weight: bold;
+                color: #072b55; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7dd3fc, stop:0.5 #a5f3fc, stop:1 #60a5fa); padding: 6px 0 5px 0; border-radius: 14px;
+                font-family: 'Times New Roman'; font-size: 18pt; font-weight: bold;
             }
         """)
         root.addWidget(header)
@@ -4362,9 +4789,9 @@ class DefineStudio(QtWidgets.QWidget):
                 color: #184a78;
                 border: 1px solid #e6d27d;
                 border-radius: 10px;
-                padding: 6px 10px;
+                padding: 4px 10px;
                 font-family: 'Times New Roman';
-                font-size: 11pt;
+                font-size: 10pt;
                 font-style: italic;
             }
         """)
@@ -4372,8 +4799,40 @@ class DefineStudio(QtWidgets.QWidget):
 
         controls = QtWidgets.QFrame(); controls.setObjectName("Controls")
         self.controls_frame = controls
-        grid = QtWidgets.QGridLayout(controls); grid.setContentsMargins(12, 10, 12, 10)
-        self.controls_grid = grid
+        controls_layout = QtWidgets.QVBoxLayout(controls)
+        controls_layout.setContentsMargins(10, 8, 10, 8)
+        controls_layout.setSpacing(6)
+
+        # Top workflow navigation. Each button shows only the inputs/actions needed for that step.
+        self.workflow_nav = QtWidgets.QHBoxLayout()
+        self.btn_nav_inputs = QtWidgets.QPushButton("1. Enter Inputs")
+        self.btn_nav_load = QtWidgets.QPushButton("2. Load Data / Metadata")
+        self.btn_nav_define = QtWidgets.QPushButton("3. Generate Define")
+        self.nav_buttons = [self.btn_nav_inputs, self.btn_nav_load, self.btn_nav_define]
+        nav_colors = [
+            ("#2563eb", "#1d4ed8"),
+            ("#7c3aed", "#5b21b6"),
+            ("#0f766e", "#115e59"),
+        ]
+        for i, btn in enumerate(self.nav_buttons):
+            base, hover = nav_colors[i]
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            btn.setMinimumHeight(46)
+            btn.setMaximumHeight(50)
+            btn.setFocusPolicy(QtCore.Qt.NoFocus)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {base}; color: white; border: 0px; border-radius: 10px; padding: 8px 12px; font-family: 'Times New Roman'; font-size: 15pt; font-weight: bold; }}"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                "QPushButton:disabled { background-color: #d9d9d9; color: #6b7280; border: 0px; }"
+            )
+            self.workflow_nav.addWidget(btn)
+        controls_layout.addLayout(self.workflow_nav)
+
+        self.workflow_stack = QtWidgets.QStackedWidget()
+        self.workflow_stack.setMinimumHeight(82)
+        self.workflow_stack.setMaximumHeight(100)
+        controls_layout.addWidget(self.workflow_stack)
+
         self.config_edit = QtWidgets.QLineEdit(DEFAULT_CONFIG_PATH)
         self.config_edit.setVisible(False)
 
@@ -4381,82 +4840,158 @@ class DefineStudio(QtWidgets.QWidget):
         self.sp_file_edit = QtWidgets.QLineEdit(DEFAULT_SPEC_FILE_PATH)
         self.dataset_edit = QtWidgets.QLineEdit()
         self.btn_data = QtWidgets.QPushButton("Browse XPT Folder")
-        self.btn_load_spec = QtWidgets.QPushButton("Load Spec and Data")
-        self.btn_refresh_formats = QtWidgets.QPushButton("Generate Format and VLM")
-        self.load_spec_vlm_chk = QtWidgets.QCheckBox("Load VLM from SharePoint spec ValueMetadata")
+        self.btn_load_spec = QtWidgets.QPushButton("Load Spec / XPT")
+        self.btn_refresh_formats = QtWidgets.QPushButton("Generate CT")
+        self.btn_generate_vlm = QtWidgets.QPushButton("Generate VLM")
+        self.load_spec_vlm_chk = QtWidgets.QCheckBox("Load ValueMetadata from specification")
         self.load_spec_vlm_chk.setChecked(True)
-        self.btn_validate = QtWidgets.QPushButton("Validate Define Inputs")
+        self.btn_validate = QtWidgets.QPushButton("Validate")
         self.btn_define = QtWidgets.QPushButton("Generate Define.xml")
         self.btn_export = QtWidgets.QPushButton("Export Review XLSX")
 
-        self.standard_combo = QtWidgets.QComboBox(); self.standard_combo.addItems(["SDTM", "ADaM"])
-        self.define_combo = QtWidgets.QComboBox(); self.define_combo.addItems(["2.0", "2.1"])
-        self.ig_edit = QtWidgets.QLineEdit("3.4")
-        self.ct_edit = QtWidgets.QLineEdit("2024-03-29")
-        self.study_oid_edit = QtWidgets.QLineEdit("STUDY")
-        self.study_name_edit = QtWidgets.QLineEdit("Study")
-        self.protocol_edit = QtWidgets.QLineEdit("Protocol")
-        self.study_desc_edit = QtWidgets.QLineEdit("Study")
-        self.odm_edit = QtWidgets.QLineEdit("1.3.2")
-        self.meddra_edit = QtWidgets.QLineEdit("")
-        self.whodrug_edit = QtWidgets.QLineEdit("")
+        self.standard_combo = make_editable_combo(DEFAULT_STANDARD_OPTIONS, "SDTM")
+        self.define_combo = make_editable_combo(DEFAULT_DEFINE_VERSION_OPTIONS, "2.0")
+        self.odm_edit = make_editable_combo(DEFAULT_ODM_VERSION_OPTIONS, "1.3.2")
+        self.ig_edit = make_editable_combo(DEFAULT_SDTM_IG_OPTIONS, "3.4")
+        self.ct_edit = make_editable_combo(DEFAULT_SDTM_CT_OPTIONS, "2024-03-29")
+        self.study_id_edit = QtWidgets.QLineEdit()
+        self.study_id_edit.setPlaceholderText("Study ID")
+        self.study_id_edit.setMaximumWidth(260)
+        # One Study ID is used consistently as Study OID, Study Name, and Protocol.
+        self.study_oid_edit = self.study_id_edit
+        self.study_name_edit = self.study_id_edit
+        self.protocol_edit = self.study_id_edit
+        self.study_desc_edit = QtWidgets.QLineEdit()
+        self.study_desc_edit.setPlaceholderText("Study Title")
+        self.meddra_edit = make_editable_combo(DEFAULT_MEDDRA_OPTIONS, "", "MedDRA version, e.g. 24.0")
+        self.whodrug_edit = make_editable_combo(DEFAULT_WHODRUG_OPTIONS, "", "WHODrug version, e.g. B3MAR2025")
         self.acrf_file_edit = QtWidgets.QLineEdit("acrf.pdf")
         self.csdrg_file_edit = QtWidgets.QLineEdit("csdrg.pdf")
         self.adrg_file_edit = QtWidgets.QLineEdit("adrg.pdf")
-        self.include_acrf = QtWidgets.QCheckBox("Include aCRF")
+        self.include_acrf = QtWidgets.QCheckBox("")
+        self.include_acrf.setToolTip("Include aCRF.pdf in define.xml")
         self.include_acrf.setChecked(True)
-        self.include_rg = QtWidgets.QCheckBox("Include RG")
-        self.include_rg.setChecked(True)
-        # Compact JSON-driven action panel: primary workflow buttons plus ValueMetadata checkbox.
-        # SharePoint/spec/XPT/study metadata fields still exist and are populated from
-        # define_config.json, but they are intentionally not displayed in the UI.
-        self.hidden_config_widgets = [
-            self.config_edit, self.site_edit, self.sp_file_edit, self.dataset_edit,
-            self.standard_combo, self.define_combo, self.ig_edit, self.ct_edit,
-            self.study_oid_edit, self.study_name_edit, self.protocol_edit,
-            self.study_desc_edit, self.odm_edit, self.meddra_edit, self.whodrug_edit,
-            self.acrf_file_edit, self.csdrg_file_edit, self.adrg_file_edit,
-            self.include_acrf, self.include_rg, self.btn_data,
+        self.include_csdrg = QtWidgets.QCheckBox("")
+        self.include_csdrg.setToolTip("Include cSDRG.pdf in define.xml")
+        self.include_csdrg.setChecked(True)
+        self.include_adrg = QtWidgets.QCheckBox("")
+        self.include_adrg.setToolTip("Include ADRG.pdf in define.xml")
+        self.include_adrg.setChecked(True)
+        # Backward-compatible alias used by existing generator logic.
+        self.include_rg = self.include_csdrg
+
+        self.input_widgets = [
+            self.site_edit, self.sp_file_edit, self.dataset_edit,
+            self.standard_combo, self.define_combo, self.ig_edit, self.ct_edit, self.odm_edit,
+            self.meddra_edit, self.whodrug_edit, self.study_id_edit,
+            self.study_desc_edit, self.acrf_file_edit, self.csdrg_file_edit,
+            self.adrg_file_edit, self.include_acrf, self.include_csdrg, self.include_adrg, self.btn_data,
+            self.load_spec_vlm_chk,
         ]
-        for w in self.hidden_config_widgets:
-            w.setVisible(False)
 
         self.action_buttons = [
             self.btn_load_spec,
             self.btn_refresh_formats,
+            self.btn_generate_vlm,
             self.btn_validate,
             self.btn_define,
             self.btn_export,
         ]
-        button_colors = [
-            ("#2f80ed", "#1f64c8"),  # Load Spec and Data
-            ("#7b61ff", "#5f45d8"),  # Generate Format and VLM
-            ("#f59f00", "#d98200"),  # Validate Define Inputs
-            ("#d6336c", "#ad2453"),  # Generate Define.xml
-            ("#495057", "#343a40"),  # Export Review XLSX
-        ]
-        for i, btn in enumerate(self.action_buttons):
-            base, hover = button_colors[i]
+
+        def add_label(grid, row, col, text):
+            lab = QtWidgets.QLabel(text)
+            lab.setStyleSheet("font-weight: bold; color: #184a78;")
+            grid.addWidget(lab, row, col)
+            return lab
+
+        # Page 1: compact top panel. Full input entry is in the Inputs tab below.
+        self.page_inputs = QtWidgets.QWidget()
+        inputs_top_lay = QtWidgets.QVBoxLayout(self.page_inputs)
+        inputs_top_lay.setContentsMargins(8, 6, 8, 6)
+        inputs_top_lay.setSpacing(4)
+        self.input_note = QtWidgets.QLabel(
+            "Enter/edit all study, SharePoint, XPT, version, dictionary, and document inputs in the Inputs tab below. "
+            "cdisc_api_key.json is used only for CDISC Library API key(s)."
+        )
+        self.input_note.setWordWrap(True)
+        self.input_note.setStyleSheet("color: #315f8f; font-style: italic;")
+        inputs_top_lay.addWidget(self.input_note)
+        inputs_top_lay.addStretch(1)
+        self.workflow_stack.addWidget(self.page_inputs)
+
+        def build_action_page(title, detail, widgets):
+            page = QtWidgets.QWidget()
+            page.setMinimumHeight(78)
+            page.setMaximumHeight(96)
+            lay = QtWidgets.QVBoxLayout(page)
+            lay.setContentsMargins(8, 4, 8, 4)
+            lay.setSpacing(4)
+            lbl = QtWidgets.QLabel(f"<b>{title}</b> - {detail}")
+            lbl.setWordWrap(False)
+            lbl.setMaximumHeight(20)
+            lbl.setStyleSheet("color: #184a78; font-size: 9pt;")
+            lay.addWidget(lbl)
+            for w in widgets:
+                if isinstance(w, QtWidgets.QLayout):
+                    lay.addLayout(w)
+                else:
+                    w.setMaximumHeight(24)
+                    lay.addWidget(w)
+            return page
+
+        def style_action_button(btn, base="#2f80ed", hover="#1f64c8"):
+            btn.setMinimumHeight(32)
+            btn.setMaximumHeight(34)
+            btn.setFocusPolicy(QtCore.Qt.NoFocus)
             btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-            btn.setMinimumWidth(0)
             btn.setStyleSheet(
-                f"QPushButton {{ background-color: {base}; color: white; border-radius: 10px; padding: 6px 10px; min-height: 34px; font-family: 'Times New Roman'; font-size: 11pt; font-weight: bold; }}"
+                f"QPushButton {{ background-color: {base}; color: white; border: 0px; border-radius: 8px; padding: 4px 10px; font-family: 'Times New Roman'; font-size: 10pt; font-weight: bold; }}"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
-                "QPushButton:disabled { background-color: #d9d9d9; color: #7a7a7a; }"
+                "QPushButton:disabled { background-color: #d9d9d9; color: #7a7a7a; border: 0px; }"
             )
-            grid.addWidget(btn, 0, i)
-            grid.setColumnStretch(i, 1)
-        grid.addWidget(self.load_spec_vlm_chk, 1, 0, 1, len(self.action_buttons))
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        controls.setMaximumHeight(90)
+
+        for b, colors in [
+            (self.btn_load_spec, ("#7c3aed", "#5b21b6")),
+            (self.btn_refresh_formats, ("#f97316", "#c2410c")),
+            (self.btn_generate_vlm, ("#16a34a", "#15803d")),
+            (self.btn_validate, ("#e11d48", "#be123c")),
+            (self.btn_define, ("#0f766e", "#115e59")),
+            (self.btn_export, ("#2563eb", "#1d4ed8")),
+        ]:
+            style_action_button(b, colors[0], colors[1])
+
+        load_buttons = QtWidgets.QHBoxLayout()
+        load_buttons.addWidget(self.btn_load_spec)
+        load_buttons.addWidget(self.btn_refresh_formats)
+        load_buttons.addWidget(self.btn_generate_vlm)
+        load_buttons.addWidget(self.btn_validate)
+
+        self.page_load = build_action_page(
+            "Load Data / Metadata",
+            "Load spec/XPT, generate CT, generate VLM, then validate.",
+            [load_buttons, self.load_spec_vlm_chk],
+        )
+        self.workflow_stack.addWidget(self.page_load)
+
+        define_buttons = QtWidgets.QHBoxLayout()
+        define_buttons.addWidget(self.btn_define)
+        define_buttons.addWidget(self.btn_export)
+        self.page_define = build_action_page(
+            "Generate Define.xml",
+            "Write define.xml to selected XPT folder or export review XLSX.",
+            [define_buttons],
+        )
+        self.workflow_stack.addWidget(self.page_define)
+
+        controls.setMaximumHeight(165)
         root.addWidget(controls)
 
         # Status panel is intentionally placed near the top so workflow progress is visible
         # even when the user is working inside any tab. New messages are appended at the bottom.
         self.status_list = QtWidgets.QListWidget()
         self.status_list.setObjectName("StatusList")
-        self.status_list.setMaximumHeight(64)
+        self.status_list.setMinimumHeight(78)
+        self.status_list.setMaximumHeight(120)
         self.status_list.setAlternatingRowColors(False)
         self.status_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         root.addWidget(self.status_list)
@@ -4468,6 +5003,90 @@ class DefineStudio(QtWidgets.QWidget):
         self.tabs.tabBar().setExpanding(True)
         self.tabs.tabBar().setUsesScrollButtons(False)
         root.addWidget(self.tabs, 1)
+
+        # Inputs tab: this uses the main review area instead of squeezing all inputs into the top panel.
+        self.tab_inputs = QtWidgets.QWidget()
+        inputs_tab_layout = QtWidgets.QVBoxLayout(self.tab_inputs)
+        inputs_tab_layout.setContentsMargins(12, 10, 12, 10)
+        inputs_tab_layout.setSpacing(8)
+        input_header = QtWidgets.QLabel(
+            "Enter all required inputs here, then click the top workflow button: 2. Load Data / Metadata."
+        )
+        input_header.setStyleSheet("font-weight: bold; color: #184a78;")
+        inputs_tab_layout.addWidget(input_header)
+        inputs_panel = QtWidgets.QFrame()
+        inputs_panel.setObjectName("Controls")
+        input_grid = QtWidgets.QGridLayout(inputs_panel)
+        input_grid.setContentsMargins(12, 10, 12, 10)
+        input_grid.setHorizontalSpacing(10)
+        input_grid.setVerticalSpacing(8)
+        self.controls_grid = input_grid
+
+        add_label(input_grid, 0, 0, "SharePoint Site")
+        input_grid.addWidget(self.site_edit, 0, 1)
+        add_label(input_grid, 0, 2, "Spec File Path")
+        input_grid.addWidget(self.sp_file_edit, 0, 3, 1, 7)
+
+        add_label(input_grid, 1, 0, "XPT Folder")
+        input_grid.addWidget(self.dataset_edit, 1, 1, 1, 8)
+        input_grid.addWidget(self.btn_data, 1, 9)
+
+        # Keep all version controls in one compact row.
+        # Labels are intentionally short/narrow so values remain visible.
+        add_label(input_grid, 2, 0, "Standard")
+        input_grid.addWidget(self.standard_combo, 2, 1)
+        add_label(input_grid, 2, 2, "Define")
+        input_grid.addWidget(self.define_combo, 2, 3)
+        add_label(input_grid, 2, 4, "ODM")
+        input_grid.addWidget(self.odm_edit, 2, 5)
+        add_label(input_grid, 2, 6, "IG")
+        input_grid.addWidget(self.ig_edit, 2, 7)
+        add_label(input_grid, 2, 8, "CT")
+        input_grid.addWidget(self.ct_edit, 2, 9)
+
+        # Compact version box widths; still editable dropdowns.
+        self.standard_combo.setMinimumWidth(95)
+        self.define_combo.setMinimumWidth(75)
+        self.odm_edit.setMinimumWidth(85)
+        self.ig_edit.setMinimumWidth(75)
+        self.ct_edit.setMinimumWidth(125)
+
+        add_label(input_grid, 3, 0, "Study Details")
+        study_row = QtWidgets.QHBoxLayout()
+        study_row.setSpacing(8)
+        study_row.addWidget(self.study_id_edit, 1)
+        study_row.addWidget(self.study_desc_edit, 4)
+        input_grid.addLayout(study_row, 3, 1, 1, 9)
+
+        add_label(input_grid, 4, 0, "MedDRA")
+        input_grid.addWidget(self.meddra_edit, 4, 1, 1, 2)
+        add_label(input_grid, 4, 3, "WHODrug")
+        input_grid.addWidget(self.whodrug_edit, 4, 4, 1, 3)
+        self.load_spec_vlm_chk.setText("Load ValueMetadata from Specification")
+        self.load_spec_vlm_chk.setToolTip("Load ValueMetadata sheet from the specification workbook")
+        input_grid.addWidget(self.load_spec_vlm_chk, 4, 7, 1, 3)
+
+        add_label(input_grid, 5, 0, "Documents to include")
+        doc_row = QtWidgets.QHBoxLayout()
+        doc_row.setSpacing(6)
+        doc_row.addWidget(self.include_acrf)
+        doc_row.addWidget(self.acrf_file_edit)
+        doc_row.addWidget(self.include_csdrg)
+        doc_row.addWidget(self.csdrg_file_edit)
+        doc_row.addWidget(self.include_adrg)
+        doc_row.addWidget(self.adrg_file_edit)
+        input_grid.addLayout(doc_row, 5, 1, 1, 9)
+
+
+        # Wider value columns, narrow label columns.
+        for c in range(10):
+            input_grid.setColumnStretch(c, 1)
+        for c in [0, 2, 4, 6, 8]:
+            input_grid.setColumnStretch(c, 0)
+
+        inputs_tab_layout.addWidget(inputs_panel)
+        inputs_tab_layout.addStretch(1)
+        self.tabs.addTab(self.tab_inputs, "Inputs")
 
         self.tab_summary = QtWidgets.QWidget(); self.summary_text = QtWidgets.QTextEdit(); self.summary_text.setReadOnly(True)
         lay = QtWidgets.QVBoxLayout(self.tab_summary); lay.addWidget(self.summary_text); self.tabs.addTab(self.tab_summary, "Summary")
@@ -4524,11 +5143,17 @@ class DefineStudio(QtWidgets.QWidget):
         self.set_status("Ready - Define XML Generator loaded", state="info")
         self.btn_data.clicked.connect(self.browse_data)
         self.btn_load_spec.clicked.connect(self.load_spec_data_and_build_metadata)
-        self.btn_refresh_formats.clicked.connect(self.generate_formats_and_vlm)
+        self.btn_refresh_formats.clicked.connect(self.generate_ct_only)
+        self.btn_generate_vlm.clicked.connect(self.generate_vlm_only)
         self.btn_validate.clicked.connect(self.validate_define_inputs)
         self.btn_define.clicked.connect(self.generate_define_xml)
         self.btn_export.clicked.connect(self.export_review_xlsx)
+        self.btn_nav_inputs.clicked.connect(lambda: self.show_workflow_page("inputs"))
+        self.btn_nav_load.clicked.connect(lambda: self.show_workflow_page("load"))
+        self.btn_nav_define.clicked.connect(lambda: self.show_workflow_page("define"))
+        self.standard_combo.currentTextChanged.connect(self.update_version_dropdowns_for_standard)
         self.load_json_config()
+        self.update_version_dropdowns_for_standard()
 
     def apply_style(self):
         self.setStyleSheet(f"""
@@ -4540,6 +5165,9 @@ class DefineStudio(QtWidgets.QWidget):
             QPushButton {{ background-color: {THEME['button']}; color: white; border-radius: 8px; padding: 7px 12px; font-weight: bold; }}
             QPushButton:hover {{ background-color: {THEME['button_hover']}; }}
             QLineEdit, QComboBox {{ background-color: white; border: 1px solid #a8bfdc; border-radius: 8px; padding: 5px; }}
+            QComboBox {{ padding: 5px 26px 5px 8px; }}
+            QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right; width: 22px; border-left: 0px; border-top-right-radius: 8px; border-bottom-right-radius: 8px; background: transparent; }}
+            QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #315f8f; margin-right: 7px; }}
             QTableView {{ background-color: white; border: 1px solid #8fb2d6; gridline-color: #c9d7e6; }}
             QHeaderView::section {{ background-color: {THEME['table_header']}; padding: 6px; border: 1px solid #8fb2d6; font-weight: bold; color: {THEME['header_text']}; }}
             QTextEdit {{ background-color: white; border: 1px solid #b7cde8; border-radius: 8px; padding: 8px; }}
@@ -4593,19 +5221,12 @@ class DefineStudio(QtWidgets.QWidget):
         proxy.setFilterFixedString(text)
 
     def _hide_config_fields_when_json_locked(self):
-        """Keep the top panel button-only.
+        """Retained for backward compatibility; the UI now stays editable.
 
-        Values are read from define_config.json and kept in hidden widgets for downstream
-        code. The visible UI shows the main workflow buttons and the ValueMetadata checkbox.
+        The JSON config no longer drives study/spec/path fields. It only supplies
+        the CDISC Library API key.
         """
-        for w in getattr(self, "hidden_config_widgets", []):
-            w.setVisible(False)
-        for btn in getattr(self, "action_buttons", []):
-            btn.setVisible(True)
-        try:
-            self.controls_frame.setMaximumHeight(96)
-        except Exception:
-            pass
+        return
 
     def browse_config(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select JSON config", str(Path.home()), "JSON Files (*.json);;All Files (*)")
@@ -4615,103 +5236,146 @@ class DefineStudio(QtWidgets.QWidget):
                 self.load_json_config()
 
     def load_json_config(self):
-        """Load define_config.json from the same folder as this .pyw.
+        """Load only CDISC Library API key(s) from cdisc_api_key.json.
 
-        Supported JSON styles:
-        1) Nested sections: sharepoint/spec, study, versions, paths, documents, gui
-        2) Flat keys retained for backward compatibility.
+        Expected JSON style:
+          {
+            "cdisc_library": {
+              "primary_key": "...",
+              "secondary_key": "..."
+            }
+          }
+
+        Backward-compatible flat keys are also accepted, but only for the API key.
+        All study/spec/XPT/document inputs must be entered in the GUI.
         """
-        # Config file name/location is fixed: define_config.json beside this script.
         path = DEFAULT_CONFIG_PATH
         if not os.path.exists(path):
-            self.set_status(f"define_config.json not found in script folder; using current/default values: {path}")
-            self.toggle_config_lock()
+            self.set_status(f"CDISC API config not found; CT lookup will run only if API key is entered in code/config: {path}")
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Invalid JSON config", str(e))
+            QtWidgets.QMessageBox.warning(self, "Invalid CDISC API JSON config", str(e))
             return
 
-        def nested_get(*paths, default=""):
-            for path_keys in paths:
-                cur = cfg
-                ok = True
-                for k in path_keys.split("."):
-                    if isinstance(cur, dict) and k in cur:
-                        cur = cur[k]
-                    else:
-                        ok = False
-                        break
-                if ok and cur is not None:
-                    return cur
-            return default
+        cdisc_library = cfg.get("cdisc_library", {}) or {}
+        cdisc = cfg.get("cdisc", {}) or {}
 
-        def set_text(widget, *paths, default=""):
-            val = nested_get(*paths, default=default)
-            if val is not None and str(val) != "":
-                widget.setText(str(val))
+        primary = safe_text(
+            cdisc_library.get("primary_key")
+            or cdisc_library.get("api_key")
+            or cfg.get("primary_key")
+            or cfg.get("api_key")
+            or cfg.get("cdisc_api_key")
+            or cdisc.get("primary_key")
+            or cdisc.get("api_key")
+        )
+        secondary = safe_text(
+            cdisc_library.get("secondary_key")
+            or cfg.get("secondary_key")
+            or cdisc.get("secondary_key")
+        )
 
-        set_text(self.site_edit, "sharepoint.site_name", "sharepoint_site", "site", "site_name")
-        set_text(self.sp_file_edit, "sharepoint.spec_file", "sharepoint.file_path", "sharepoint_file", "spec_file", "file_path", "spec_path")
-        set_text(self.dataset_edit, "paths.xpt_folder", "paths.xpt_path", "xpt_folder", "xpt_path", "data_path", "dataset_path")
+        self.cdisc_api_key = primary
+        self.cdisc_secondary_key = secondary
 
-        set_text(self.ig_edit, "versions.ig_version", "ig_version", "sdtm_ig_version", "adam_ig_version")
-        set_text(self.ct_edit, "versions.ct_version", "ct_version")
-        set_text(self.odm_edit, "versions.odm_version", "odm_version", default="1.3.2")
-        set_text(self.meddra_edit, "versions.meddra_version", "meddra_version")
-        set_text(self.whodrug_edit, "versions.whodrug_version", "whodrug_version", "who_drug_version")
-        self.cdisc_api_key = safe_text(nested_get("cdisc_library.api_key", "cdisc.api_key", "cdisc_api_key", "api_key"))
+        if self.cdisc_api_key:
+            self.set_status("CDISC API key loaded from cdisc_api_key.json")
+            self.refresh_version_dropdowns_from_cdisc_library(silent=True)
+        else:
+            self.set_status("cdisc_api_key.json loaded, but no CDISC API key was found", "error")
 
-        set_text(self.study_oid_edit, "study.study_oid", "study_oid")
-        set_text(self.study_name_edit, "study.study_name", "study_name")
-        set_text(self.study_desc_edit, "study.study_description", "study.description", "study_description")
-        set_text(self.protocol_edit, "study.protocol", "protocol")
 
-        set_text(self.acrf_file_edit, "documents.acrf_file", "acrf_file", default="acrf.pdf")
-        set_text(self.csdrg_file_edit, "documents.csdrg_file", "csdrg_file", default="csdrg.pdf")
-        set_text(self.adrg_file_edit, "documents.adrg_file", "adrg_file", default="adrg.pdf")
+    def update_version_dropdowns_for_standard(self):
+        """Refresh IG and CT choices based on selected Standard.
 
-        std = safe_upper(nested_get("study.standard", "standard"))
-        if std in {"SDTM", "ADAM"}:
-            self.standard_combo.setCurrentText("ADaM" if std == "ADAM" else "SDTM")
-        dv = safe_text(nested_get("versions.define_version", "define_version"))
-        if dv in {"2.0", "2.1"}:
-            self.define_combo.setCurrentText(dv)
+        SDTM shows only SDTMIG and SDTM CT releases.
+        ADaM shows only ADaMIG and ADaM CT releases.
+        Current values are preserved only if valid for the selected standard.
+        """
+        std = safe_upper(combo_text(self.standard_combo))
+        if std == "ADAM":
+            ig_values = _clean_ig_versions(DEFAULT_ADAM_IG_OPTIONS, "ADAM") or ["1.3", "1.2", "1.1", "1.0"]
+            ct_values = _clean_ct_versions(DEFAULT_ADAM_CT_OPTIONS) or DEFAULT_ADAM_CT_OPTIONS
+        else:
+            ig_values = _clean_ig_versions(DEFAULT_SDTM_IG_OPTIONS, "SDTM") or ["3.4", "3.3", "3.2", "3.1", "3.0"]
+            ct_values = _clean_ct_versions(DEFAULT_SDTM_CT_OPTIONS) or DEFAULT_SDTM_CT_OPTIONS
 
-        inc_acrf = nested_get("documents.include_acrf", "include_acrf", default=None)
-        if inc_acrf is not None:
-            self.include_acrf.setChecked(bool(inc_acrf))
-        inc_rg = nested_get("documents.include_rg", "include_rg", default=None)
-        if inc_rg is not None:
-            self.include_rg.setChecked(bool(inc_rg))
+        refill_combo_strict(self.ig_edit, ig_values)
+        refill_combo_strict(self.ct_edit, ct_values)
+        refill_combo(self.define_combo, DEFAULT_DEFINE_VERSION_OPTIONS, keep_current=True)
+        refill_combo(self.odm_edit, DEFAULT_ODM_VERSION_OPTIONS, keep_current=True)
 
-        use_spec_vlm = nested_get("gui.load_vlm_from_sharepoint_spec", "load_vlm_from_sharepoint_spec", default=None)
-        if use_spec_vlm is not None and hasattr(self, "load_spec_vlm_chk"):
-            self.load_spec_vlm_chk.setChecked(bool(use_spec_vlm))
+    def refresh_version_dropdowns_from_cdisc_library(self, silent=True):
+        """Best-effort refresh of IG/CT dropdowns from CDISC Library.
 
-        # Allow JSON to control initial checkbox state, default checked.
-        use_json = nested_get("gui.use_json_defaults", "use_json_defaults", default=True)
+        If the API endpoint is unavailable or returns a different shape, the GUI keeps
+        the built-in fallback lists. This keeps the tool usable offline and on servers
+        without internet access.
+        """
+        api_key = safe_text(getattr(self, "cdisc_api_key", ""))
+        if not api_key:
+            return
 
-        self.toggle_config_lock()
-        self.set_status("JSON config loaded: define_config.json")
+        def request_json(url):
+            req = urllib.request.Request(url, headers={"api-key": api_key, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+        def iter_values(obj):
+            if isinstance(obj, dict):
+                yield obj
+                for v in obj.values():
+                    yield from iter_values(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    yield from iter_values(v)
+
+        try:
+            payload = request_json("https://library.cdisc.org/api/mdr/products")
+            sdtmig, adamig, sdtm_ct_dates, adam_ct_dates = set(), set(), set(), set()
+            for d in iter_values(payload):
+                txt = " ".join(safe_text(v) for v in d.values() if isinstance(v, (str, int, float)))
+                up = safe_upper(txt)
+                for m in re.findall(r"\b(?:20\d{2}-\d{2}-\d{2})\b", txt):
+                    if ("SDTM" in up and ("CT" in up or "TERMINOLOGY" in up)) or "SDTMCT" in up:
+                        sdtm_ct_dates.add(m)
+                    if ("ADAM" in up and ("CT" in up or "TERMINOLOGY" in up)) or "ADAMCT" in up:
+                        adam_ct_dates.add(m)
+                for m in re.findall(r"SDTMIG[^0-9]*(\d+(?:\.\d+)*)", up):
+                    sdtmig.add(m)
+                for m in re.findall(r"ADAMIG[^0-9]*(\d+(?:\.\d+)*)", up):
+                    adamig.add(m)
+            sdtmig_clean = _clean_ig_versions(sdtmig, "SDTM")
+            adamig_clean = _clean_ig_versions(adamig, "ADAM")
+            sdtm_ct_clean = _clean_ct_versions(sdtm_ct_dates)
+            adam_ct_clean = _clean_ct_versions(adam_ct_dates)
+
+            if sdtmig_clean:
+                globals()["DEFAULT_SDTM_IG_OPTIONS"][:] = sdtmig_clean
+            if adamig_clean:
+                globals()["DEFAULT_ADAM_IG_OPTIONS"][:] = adamig_clean
+            if sdtm_ct_clean:
+                globals()["DEFAULT_SDTM_CT_OPTIONS"][:] = sdtm_ct_clean
+            if adam_ct_clean:
+                globals()["DEFAULT_ADAM_CT_OPTIONS"][:] = adam_ct_clean
+            globals()["DEFAULT_CT_VERSION_OPTIONS"] = globals()["DEFAULT_SDTM_CT_OPTIONS"]
+            self.update_version_dropdowns_for_standard()
+            if not silent:
+                self.set_status("CDISC Library version lists refreshed", "done")
+        except Exception as e:
+            if not silent:
+                self.set_status(f"CDISC Library version refresh skipped: {e}", "error")
 
     def toggle_config_lock(self):
-        locked = True
-        # When checked, fields are fed from JSON and locked. Uncheck to edit individual boxes.
-        widgets = [
-            self.site_edit, self.sp_file_edit, self.dataset_edit,
-            self.standard_combo, self.define_combo, self.ig_edit, self.ct_edit, self.odm_edit,
-            self.meddra_edit, self.whodrug_edit, self.study_oid_edit, self.study_name_edit,
-            self.study_desc_edit, self.protocol_edit, self.acrf_file_edit, self.csdrg_file_edit,
-            self.adrg_file_edit, self.include_acrf, self.include_rg,
-        ]
-        for w in widgets:
-            w.setEnabled(not locked)
-        self.config_edit.setEnabled(False)
-        self.config_edit.setVisible(False)
-        self._hide_config_fields_when_json_locked()
+        """No field locking. Inputs are now GUI-driven except the CDISC API key."""
+        for w in getattr(self, "input_widgets", []):
+            try:
+                w.setEnabled(True)
+            except Exception:
+                pass
 
     def browse_data(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select XPT dataset folder", str(Path.home()))
@@ -4902,7 +5566,7 @@ class DefineStudio(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Metadata missing", "Build Metadata Editor first.")
             return
         self.set_status("Generating formats from spec-defined codelists and XPT values...")
-        ct_version = self.ct_edit.text().strip()
+        ct_version = combo_text(self.ct_edit).strip()
         self.ct_alias_map = fetch_define_ct_map(
             self.cdisc_api_key,
             self.standard_combo.currentText(),
@@ -5003,7 +5667,7 @@ class DefineStudio(QtWidgets.QWidget):
                         dmap = {safe_upper(r.get("Dataset")): safe_text(r.get("Description")) for _, r in self.domains_df.iterrows()}
                         decode = dmap.get(safe_upper(code), decode or code)
                 # For self-decode codelists such as EPOCH/PARCAT1, use the value as decode.
-                if not decode and safe_upper(code_col) in {"PARAM", "PARCAT1", "PARCAT2", "PARCAT3", "VISIT", "AVISIT", "EPOCH", "DOMAIN", "RDOMAIN", "ELEMENT"}:
+                if not decode and safe_upper(code_col) in {"PARAM", "PARCAT1", "PARCAT2", "PARCAT3", "VISIT", "AVISIT", "EPOCH", "DOMAIN", "RDOMAIN", "ELEMENT", "DATEST"}:
                     decode = code
                 sortv = sas_best_text(tr.get(order_col)) if order_col else ""
                 ct_info = get_ct_info_generic(getattr(self, "ct_alias_map", {}), fmt)
@@ -5190,6 +5854,17 @@ class DefineStudio(QtWidgets.QWidget):
                 self.formats_df["Format"] = self.formats_df["Format"].apply(
                     lambda x: standardize_format_for_define(x, ct_map)
                 )
+        except Exception:
+            pass
+
+        # DA DATESTCD / DATEST safety: keep both codelists complete and separate.
+        # DATESTCD uses DATEST values only as Decode text; DATEST remains its own codelist.
+        try:
+            self.formats_df = enforce_datest_pair_codelists(
+                self.formats_df,
+                getattr(self, "datasets", {}),
+                getattr(self, "ct_alias_map", {})
+            )
         except Exception:
             pass
 
@@ -5601,8 +6276,8 @@ class DefineStudio(QtWidgets.QWidget):
             writer = DefineXmlWriter(
                 standard=self.standard_combo.currentText(),
                 define_version=self.define_combo.currentText(),
-                ig_version=self.ig_edit.text(),
-                ct_version=self.ct_edit.text(),
+                ig_version=combo_text(self.ig_edit),
+                ct_version=combo_text(self.ct_edit),
                 study_oid=self.study_oid_edit.text(),
                 study_name=self.study_name_edit.text(),
                 protocol=self.protocol_edit.text(),
@@ -5611,11 +6286,11 @@ class DefineStudio(QtWidgets.QWidget):
                 vlm_df=self.vlm_df,
                 out_dir=out_dir,
                 include_acrf=self.include_acrf.isChecked(),
-                include_rg=self.include_rg.isChecked(),
-                odm_version=self.odm_edit.text(),
+                include_rg=(self.include_csdrg.isChecked() or self.include_adrg.isChecked()),
+                odm_version=combo_text(self.odm_edit),
                 study_description=self.study_desc_edit.text(),
-                meddra_version=self.meddra_edit.text(),
-                whodrug_version=self.whodrug_edit.text(),
+                meddra_version=combo_text(self.meddra_edit),
+                whodrug_version=combo_text(self.whodrug_edit),
                 acrf_file=self.acrf_file_edit.text(),
                 csdrg_file=self.csdrg_file_edit.text(),
                 adrg_file=self.adrg_file_edit.text(),
@@ -5727,31 +6402,69 @@ class DefineStudio(QtWidgets.QWidget):
 
 
 
-    def set_workflow_state(self, stage="initial"):
-        """Enable buttons by workflow stage."""
+    def show_workflow_page(self, page_name):
+        """Show the requested workflow section in the compact top panel."""
+        page_map = {
+            "inputs": 0,
+            "load": 1,
+            "ct": 1,
+            "vlm": 1,
+            "validate": 1,
+            "define": 2,
+        }
         try:
-            for b in [
-                self.btn_load_spec,
-                self.btn_refresh_formats,
-                self.btn_validate,
-                self.btn_define,
-                self.btn_export,
-            ]:
-                b.setEnabled(False)
+            if hasattr(self, "workflow_stack"):
+                self.workflow_stack.setCurrentIndex(page_map.get(page_name, 0))
+            if page_name == "inputs" and hasattr(self, "tabs") and hasattr(self, "tab_inputs"):
+                self.tabs.setCurrentWidget(self.tab_inputs)
+        except Exception:
+            pass
 
+    def set_workflow_state(self, stage="initial"):
+        """Enable workflow pages/buttons without squeezing all actions into one row."""
+        try:
+            is_initial = stage == "initial"
+
+            if hasattr(self, "tabs"):
+                self.tabs.setVisible(True)
+
+            if hasattr(self, "controls_frame"):
+                self.controls_frame.setMaximumHeight(135)
+
+            # Navigation is always visible. Disable downstream sections until prerequisites exist.
+            loaded = stage in {"metadata", "formats", "vlm", "validated", "generated"}
+            ct_ready = stage in {"formats", "vlm", "validated", "generated"}
+            vlm_ready = stage in {"vlm", "validated", "generated"}
+            validated = stage in {"validated", "generated"}
+
+            nav_state = [True, True, ct_ready or vlm_ready or validated]
+            for btn, enabled in zip(getattr(self, "nav_buttons", []), nav_state):
+                btn.setEnabled(enabled)
+
+            # Action buttons are visible only inside their section page, but enabled by stage.
             self.btn_load_spec.setEnabled(True)
+            self.btn_refresh_formats.setEnabled(loaded)
+            self.btn_generate_vlm.setEnabled(ct_ready)
+            self.btn_validate.setEnabled(ct_ready or vlm_ready)
+            self.btn_define.setEnabled(ct_ready or vlm_ready)
+            self.btn_export.setEnabled(validated or getattr(self, "review_export_available", False))
 
-            if stage in {"metadata", "formats", "validated", "generated"}:
-                self.btn_refresh_formats.setEnabled(True)
+            # Inputs remain editable from the Enter Inputs section.
+            for w in getattr(self, "input_widgets", []):
+                w.setEnabled(True)
 
-            if stage in {"formats", "validated", "generated"}:
-                self.btn_validate.setEnabled(True)
-                # Generate Define also runs validation internally, so it should not stay frozen
-                # after Format/VLM generation.
-                self.btn_define.setEnabled(True)
-
-            if stage in {"validated", "generated"} or getattr(self, "review_export_available", False):
-                self.btn_export.setEnabled(True)
+            if is_initial:
+                self.show_workflow_page("inputs")
+            elif stage == "metadata":
+                self.show_workflow_page("load")
+            elif stage == "formats":
+                self.show_workflow_page("load")
+            elif stage == "vlm":
+                self.show_workflow_page("load")
+            elif stage == "validated":
+                self.show_workflow_page("define")
+            elif stage == "generated":
+                self.show_workflow_page("define")
         except Exception:
             pass
 
@@ -5800,6 +6513,45 @@ class DefineStudio(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Generate Format and VLM failed", traceback.format_exc())
         finally:
             self.set_workflow_state("formats" if ok else "metadata")
+
+
+    def generate_ct_only(self):
+        """Generate/refresh only the Formats / CT grid."""
+        self.review_export_available = False
+        self.define_generated = False
+        self.set_buttons_busy(True)
+        ok = False
+        try:
+            self.set_status("Generating CT / formats", "running")
+            self.generate_formats()
+            self.set_status("Generating CT / formats - done", "done")
+            ok = True
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentWidget(self.tab_formats)
+        except Exception as e:
+            self.set_status(f"Generate CT / formats failed: {e}", "error")
+            QtWidgets.QMessageBox.critical(self, "Generate CT / formats failed", traceback.format_exc())
+        finally:
+            self.set_workflow_state("formats" if ok else "metadata")
+
+    def generate_vlm_only(self):
+        """Generate or load only VLM after CT/formats are available."""
+        self.review_export_available = False
+        self.define_generated = False
+        self.set_buttons_busy(True)
+        ok = False
+        try:
+            self.set_status("Generating VLM", "running")
+            self.generate_vlm()
+            self.set_status("Generating VLM - done", "done")
+            ok = True
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentWidget(self.tab_vlm)
+        except Exception as e:
+            self.set_status(f"Generate VLM failed: {e}", "error")
+            QtWidgets.QMessageBox.critical(self, "Generate VLM failed", traceback.format_exc())
+        finally:
+            self.set_workflow_state("vlm" if ok else "formats")
 
 
     def get_loaded_ct_dataframe(self):
