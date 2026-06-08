@@ -147,6 +147,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from openpyxl import load_workbook
 
 
+# PATCH NOTE 2026-06-01: NCI codelist/term codes are CT-only; missing matches are shown as * in review and skipped as XML Alias.
 code = ""  # global fallback to prevent legacy bare-code NameError
 # ================================================================================================
 # Constants / config
@@ -158,15 +159,16 @@ GET_SPREADSHEET_SCRIPT = r"P:\BSP_LocalDev\_GLIB\harm_bsp_v_1_0\macros\report\ap
 DEFAULT_SITE_NAME = "BSP Demo Project"
 DEFAULT_SPEC_FILE_PATH = "BSP/SDTM_Specs/CSR/SDTM_Specification.xlsx"
 DEFAULT_CONFIG_PATH = str(Path(__file__).resolve().parent / "cdisc_api_key.json")
+DEFAULT_INPUTS_PATH = str(Path(__file__).resolve().parent / "define_inputs.json")
 
 SPEC_COLUMNS = [
     "Dataset", "Variable", "Label", "ID Var", "Keep", "Type", "Len",
-    "Control or Format", "Term", "Core", "Role", "Origin", "Comments"
+    "Control or Format", "Term", "Core", "Role", "Origin", "Pages", "Comments"
 ]
 
 EDITOR_COLUMNS = [
     "Dataset", "Variable", "Label", "Keep", "ID Var", "Length", "Type",
-    "Format", "Origin", "Source", "Has No Data", "Comments",
+    "Format", "Origin", "Pages", "Source", "Has No Data", "Comments",
     "Data Type", "Data Format", "Order", "XPT Source"
 ]
 
@@ -200,8 +202,8 @@ DOMAIN_CLASS_ORDER = {
     "TRIAL DESIGN": 1,
     "TRIAL DOMAINS": 1,
     "SPECIAL PURPOSE": 2,
-    "EVENTS": 3,
-    "INTERVENTIONS": 4,
+    "EVENTS": 4,
+    "INTERVENTIONS": 3,
     "FINDINGS": 5,
     "FINDING": 5,
     "FINDINGS ABOUT": 6,
@@ -268,6 +270,95 @@ def dataset_class_sort_value(ds, domain_lookup, standard=""):
     if is_supp_qual_dataset(ds):
         dclass = "RELATIONSHIP"
     return DOMAIN_CLASS_ORDER.get(dclass, 99)
+
+
+def dataset_define_sort_key(ds, domain_lookup, standard="", metadata_df=None):
+    """Stable Define dataset display order.
+
+    Primary order is by class.  SUPP*/SQ* datasets are forced to the end so
+    supplemental qualifier sections do not appear before their parent domains
+    when Domains-sheet metadata is missing or has template/default values.
+    """
+    ds = safe_upper(ds)
+    if is_supp_qual_dataset(ds):
+        parent = supp_parent_domain(ds)
+        # SUPP/SQ datasets must always be after parent/standard domains in the
+        # top Datasets table and detailed sections.  Use a very high rank;
+        # normal SDTM domains can have rank 99 when Domains sheet metadata is
+        # missing, so 98 is not safe.
+        return (999, parent or ds, ds)
+
+    # If Domains/Datasets sheet metadata is missing, still sort by standard
+    # SDTM class inferred from the domain name instead of leaving everything at 99.
+    info = domain_lookup.get(ds, {}) if isinstance(domain_lookup, dict) else {}
+    if not safe_text(info.get("Class")):
+        info = dict(info)
+        info["Class"] = default_dataset_class(ds, standard)
+    class_rank = dataset_class_sort_value(ds, {ds: info}, standard)
+    return (class_rank, ds, ds)
+
+
+def infer_key_candidates_from_xpt(dataset, variables, standard=""):
+    """Infer KeySequence candidates from variables present in the XPT.
+
+    XPT files do not store Define-XML key metadata.  This is only a practical
+    fallback when the spec/Datasets sheet has no keys.  The function uses
+    standard SDTM/ADaM key patterns and only keeps variables physically present
+    in the XPT/editor metadata.
+    """
+    ds = safe_upper(dataset)
+    vars_set = {safe_upper(v) for v in (variables or [])}
+    std = safe_upper(standard)
+
+    if std == "ADAM":
+        if ds == "ADSL":
+            candidates = ["STUDYID", "USUBJID"]
+        else:
+            candidates = ["STUDYID", "USUBJID", "PARAMCD", "PARAMN", "AVISITN", "ADT", "ADTM", "ASEQ"]
+    else:
+        if is_supp_qual_dataset(ds):
+            candidates = ["STUDYID", "RDOMAIN", "USUBJID", "IDVAR", "IDVARVAL", "QNAM"]
+        elif ds == "DM":
+            candidates = ["STUDYID", "USUBJID"]
+        elif ds == "RELREC":
+            candidates = ["STUDYID", "RDOMAIN", "USUBJID", "IDVAR", "IDVARVAL", "RELTYPE", "RELID"]
+        elif ds == "TA":
+            candidates = ["STUDYID", "ARMCD", "TAETORD"]
+        elif ds == "TE":
+            candidates = ["STUDYID", "ETCD"]
+        elif ds == "TI":
+            candidates = ["STUDYID", "IETESTCD"]
+        elif ds == "TS":
+            candidates = ["STUDYID", "TSPARMCD", "TSSEQ"]
+        elif ds == "TV":
+            candidates = ["STUDYID", "VISITNUM"]
+        else:
+            seq = f"{ds}SEQ"
+            candidates = ["STUDYID", "DOMAIN", "USUBJID", seq]
+
+    return [v for v in candidates if v in vars_set]
+
+
+def apply_xpt_key_fallback(editor_df, standard=""):
+    """Populate blank ID Var/KeySequence from XPT-present variables only when absent."""
+    if not isinstance(editor_df, pd.DataFrame) or editor_df.empty:
+        return editor_df
+    if "Dataset" not in editor_df.columns or "Variable" not in editor_df.columns:
+        return editor_df
+    out = editor_df.copy()
+    if "ID Var" not in out.columns:
+        out["ID Var"] = ""
+    for ds in [safe_upper(x) for x in out["Dataset"].dropna().unique()]:
+        mask = out["Dataset"].apply(safe_upper) == ds
+        # Preserve any spec/Datasets-sheet keys.  Fallback only when all are blank.
+        if any(safe_text(v) for v in out.loc[mask, "ID Var"].tolist()):
+            continue
+        variables = out.loc[mask, "Variable"].apply(safe_upper).tolist()
+        keys = infer_key_candidates_from_xpt(ds, variables, standard)
+        for seq, var in enumerate(keys, start=1):
+            vmask = mask & (out["Variable"].apply(safe_upper) == var)
+            out.loc[vmask, "ID Var"] = str(seq)
+    return out
 
 
 def get_dataset_repeating_reference(dataset, domain_class="", standard=""):
@@ -708,6 +799,105 @@ SDTM_SUBCLASS_MAP = {
 }
 
 
+
+default_sdtm_dataset_description_map = {
+    "AE": "Adverse Events", "BE": "Biospecimen Events", "CE": "Clinical Events",
+    "CM": "Concomitant/Prior Medications", "CO": "Comments", "DA": "Drug Accountability",
+    "DD": "Death Details", "DM": "Demographics", "DS": "Disposition", "DV": "Protocol Deviations",
+    "EC": "Exposure as Collected", "EG": "ECG Test Results", "EX": "Exposure",
+    "FA": "Findings About", "HO": "Healthcare Encounters", "IE": "Inclusion/Exclusion Criteria Not Met",
+    "IS": "Immunogenicity Specimen Assessments", "LB": "Laboratory Test Results", "MB": "Microbiology Specimen",
+    "MH": "Medical History", "MS": "Microbiology Susceptibility", "PC": "Pharmacokinetic Concentrations",
+    "PE": "Physical Examination", "PP": "Pharmacokinetic Parameters", "PR": "Procedures",
+    "QS": "Questionnaires", "RE": "Respiratory System Findings", "RP": "Reproductive System Findings",
+    "RS": "Disease Response", "SC": "Subject Characteristics", "SE": "Subject Elements",
+    "SS": "Subject Status", "SU": "Substance Use", "SV": "Subject Visits",
+    "TA": "Trial Arms", "TD": "Trial Disease Assessments", "TE": "Trial Elements",
+    "TI": "Trial Inclusion/Exclusion Criteria", "TM": "Trial Disease Milestones", "TR": "Tumor Results",
+    "TS": "Trial Summary", "TU": "Tumor Identification", "TV": "Trial Visits", "VS": "Vital Signs",
+    "RELREC": "Related Records",
+}
+
+def default_dataset_description(dataset, standard=""):
+    ds = safe_upper(dataset)
+    if is_supp_qual_dataset(ds):
+        parent = supp_parent_domain(ds)
+        return f"Supplemental Qualifiers for {parent}" if parent else "Supplemental Qualifiers"
+    if safe_upper(standard) == "ADAM":
+        if ds == "ADSL":
+            return "Subject-Level Analysis Dataset"
+        return ds
+    return default_sdtm_dataset_description_map.get(ds, ds)
+
+
+def get_xpt_dataset_label_from_meta(meta, path="", dataset=""):
+    """Return the SAS/XPT dataset label from pyreadstat metadata when available."""
+    candidates = []
+    for attr in [
+        "file_label", "table_label", "dataset_label", "dataframe_label",
+        "sas_dataset_label", "label", "file_description", "table_name",
+    ]:
+        try:
+            val = getattr(meta, attr, "")
+        except Exception:
+            val = ""
+        if safe_text(val):
+            candidates.append(safe_text(val))
+    ds = safe_upper(dataset) or safe_upper(Path(path).stem if path else "")
+    # Do not treat the bare member name as a meaningful label.
+    for val in candidates:
+        if val and safe_upper(val) != ds:
+            return val
+    return ""
+
+
+def apply_xpt_dataset_labels_to_domains(domains_df, xpt_dataset_labels=None, metadata_df=None, standard=""):
+    """Apply dataset description priority: spec description > XPT label > standard fallback.
+
+    XPT labels are used only when the Domains/Datasets sheet description is
+    blank or merely repeats the dataset name. Explicit sponsor/spec descriptions
+    are preserved. Missing domain rows are added for datasets present in the
+    metadata editor so Define dataset labels can still be populated.
+    """
+    xpt_dataset_labels = {safe_upper(k): safe_text(v) for k, v in (xpt_dataset_labels or {}).items() if safe_text(v)}
+    out = domains_df.copy() if isinstance(domains_df, pd.DataFrame) else pd.DataFrame(columns=DOMAIN_COLUMNS)
+    for c in DOMAIN_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out["Dataset"] = out["Dataset"].apply(safe_upper) if "Dataset" in out.columns else ""
+
+    present = {safe_upper(x) for x in out.get("Dataset", pd.Series(dtype=str)).tolist() if safe_text(x)}
+    meta_datasets = []
+    if isinstance(metadata_df, pd.DataFrame) and not metadata_df.empty and "Dataset" in metadata_df.columns:
+        meta_datasets = sorted({safe_upper(x) for x in metadata_df["Dataset"].tolist() if safe_text(x)})
+    for ds in meta_datasets:
+        if ds not in present:
+            out = pd.concat([out, pd.DataFrame([{c: "" for c in DOMAIN_COLUMNS}])], ignore_index=True)
+            out.at[out.index[-1], "Dataset"] = ds
+            present.add(ds)
+
+    for i, row in out.iterrows():
+        ds = safe_upper(row.get("Dataset"))
+        if not ds:
+            continue
+        desc = safe_text(row.get("Description"))
+        if (not desc or safe_upper(desc) == ds) and safe_text(xpt_dataset_labels.get(ds)):
+            out.at[i, "Description"] = xpt_dataset_labels.get(ds)
+        elif not desc:
+            out.at[i, "Description"] = default_dataset_description(ds, standard)
+        if not safe_text(row.get("Class")):
+            out.at[i, "Class"] = default_dataset_class(ds, standard)
+        if not safe_text(row.get("Subclass")):
+            out.at[i, "Subclass"] = default_dataset_subclass(ds, out.at[i, "Class"], row.get("Structure"), standard)
+        if not safe_text(row.get("Structure")):
+            out.at[i, "Structure"] = "One record per subject per event/assessment as applicable"
+        if not safe_text(row.get("Purpose")):
+            out.at[i, "Purpose"] = "Tabulation" if safe_upper(standard) == "SDTM" else "Analysis"
+        if not safe_text(row.get("Location")):
+            out.at[i, "Location"] = f"{ds.lower()}.xpt"
+
+    return out[DOMAIN_COLUMNS].copy()
+
 def default_dataset_class(dataset, standard=""):
     """Return a safe default Define-XML 2.1 def:Class/@Name.
 
@@ -829,8 +1019,12 @@ def normalize_dataset_type(value):
 def is_support_sheet(sheet_name):
     name = safe_upper(sheet_name).replace(" ", "_")
     exclude_exact = {
-        "README", "READ_ME", "STATUS", "DOMAINS", "BLANK_SPEC", "SOURCE_DATA",
-        "SUPPQUAL", "SUPP_TEMP", "FORMATS", "VALUEMETADATA", "VALUE_METADATA", "VALUEMETADATA",
+        "README", "READ_ME", "STATUS", "DOMAINS", "DATASETS", "BLANK_SPEC", "SOURCE_DATA",
+        "SOURCE_VS_ECRF_FORM", "SOURCEVSECRFFORM",
+        "SUPPQUAL", "SUPP_TEMP", "SUPP__", "SUPP--", "FORMATS",
+        "CODELISTS", "VALUELEVEL", "VALUEMETADATA", "VALUE_METADATA", "VALUEMETADATA",
+        "DICTIONARIES", "DOCUMENTS", "DOCUMENT_LINKS", "DOCUMENTLINKS",
+        "INTERVENTIONS", "EVENTS", "FINDINGS",
         "DEV_FORMATS", "QC_FORMATS", "LB_FORMATS", "QC_LB_EXT_TESTS",
         "QS_TESTCD", "LOOKUPS"
     }
@@ -998,12 +1192,44 @@ def looks_like_datetime(series):
 
 
 def infer_type_from_values(series, storage_type="", storage_length=""):
+    """Infer Define type/length from submitted values without overriding XPT storage type.
+
+    XPT physical metadata is the source of truth for dataset variable type.
+    Character variables such as AESPID/LBORRES can contain numeric-looking values,
+    but they must remain char in the Define variable metadata when the XPT stores
+    them as character.  Value-level metadata may still call this without
+    storage_type when a value-specific datatype is intentionally inferred.
+    """
     vals = [safe_text(v) for v in series.dropna().tolist() if safe_text(v)]
     stype = normalize_dataset_type(storage_type)
+    storage_len = to_int_or_none(storage_length)
+
+    # Critical fix: never convert an XPT character variable to numeric just
+    # because its values look numeric.  This fixes AESPID, LBORRES, --SPID,
+    # QVAL, and similar submitted character variables.
+    if stype == "char":
+        if storage_len is not None:
+            return "char", storage_len, ""
+        return "char", max([len(v) for v in vals] or [1]), ""
+
+    # Numeric XPT variables should remain numeric. Use values only to determine
+    # whether a decimal display format/significant digit hint is useful.
+    if stype in {"num", "float", "numeric", "integer", "double"}:
+        max_width = 1
+        max_decimals = 0
+        for v in vals[:1000]:
+            try:
+                float(v)
+                max_width = max(max_width, len(v))
+                if "." in v:
+                    max_decimals = max(max_decimals, len(v.split(".")[-1].rstrip("0")))
+            except Exception:
+                pass
+        if max_decimals > 0:
+            return "float", 8, f"{max(8, max_width)}.{max_decimals}"
+        return "num", 8, "8"
 
     if not vals:
-        if stype == "char":
-            return "char", to_int_or_none(storage_length) or 1, ""
         return "num", 8, "8"
 
     ser = pd.Series(vals)
@@ -1034,6 +1260,123 @@ def infer_type_from_values(series, storage_type="", storage_length=""):
         return "num", 8, "8"
 
     return "char", max(len(v) for v in vals), ""
+
+
+
+
+def normalize_vlm_type_name(value):
+    """Normalize VLM Type to Define-friendly review values.
+
+    VLM Type may come from spec as text/integer/float or from generated logic as
+    char/num/float.  Keep text/integer/float explicit so Define ItemDef DataType
+    is not accidentally written as text for integer VLM rows.
+    """
+    t = safe_upper(value)
+    if t in {"CHAR", "CHARACTER", "TEXT", "STRING", "OBJECT"}:
+        return "text"
+    if t in {"NUM", "NUMBER", "NUMERIC", "INTEGER", "INT"}:
+        return "integer"
+    if t in {"FLOAT", "DOUBLE", "DECIMAL"}:
+        return "float"
+    if t == "DATE":
+        return "date"
+    if t == "DATETIME":
+        return "datetime"
+    return safe_text(value).lower() if safe_text(value) else ""
+
+
+def infer_vlm_type_len_format(series, spec_type="", spec_length="", spec_format=""):
+    """Return VLM Type/Length/Format.
+
+    When a value series is supplied, the submitted XPT values are the source of
+    truth. Spec Type/Length/Format are used only as fallback when series is
+    missing or empty.
+    """
+    vals = [safe_text(v) for v in series.dropna().tolist() if safe_text(v)] if series is not None else []
+
+    if vals:
+        if looks_like_datetime(pd.Series(vals)):
+            return "datetime", str(max(len(v) for v in vals)), ""
+        if looks_like_date(pd.Series(vals)):
+            return "date", str(max(len(v) for v in vals)), ""
+
+        numeric_ok = True
+        max_width = 1
+        max_decimals = 0
+        has_fraction = False
+        for raw in vals[:1000]:
+            v = safe_text(raw).replace(",", "")
+            if v == "":
+                continue
+            try:
+                num = float(v)
+                max_width = max(max_width, len(v))
+                if not num.is_integer():
+                    has_fraction = True
+                # For SDTM --ORRES/QVAL VLM, preserve the submitted/displayed
+                # XPT value representation. A value like 197.0 must remain float
+                # with format 8.1; do not collapse it to integer just because the
+                # numeric value is mathematically whole.
+                m = re.search(r"[.](\d+)", v)
+                if m:
+                    decimals = len(m.group(1))
+                    if decimals > 0:
+                        has_fraction = True
+                        max_decimals = max(max_decimals, decimals)
+            except Exception:
+                numeric_ok = False
+                break
+
+        if numeric_ok:
+            if has_fraction:
+                dec = max(max_decimals, 1)
+                return "float", "8", f"{max(8, max_width)}.{dec}"
+            return "integer", "8", "8"
+
+        return "text", str(max(len(v) for v in vals)), ""
+
+    # Fallback only when no XPT values are available.
+    stype = normalize_vlm_type_name(spec_type)
+    slen = safe_text(spec_length)
+    sfmt = safe_text(spec_format)
+    if stype:
+        if stype in {"integer", "float"}:
+            return stype, slen or "8", sfmt or ("8" if stype == "integer" else "")
+        if stype in {"date", "datetime"}:
+            return stype, slen, sfmt
+        return stype, slen or "200", sfmt
+    return "text", slen or "1", sfmt
+
+def get_xpt_variable_length(meta, column, series=None, storage_type=""):
+    """Return the physical XPT variable length when pyreadstat exposes it.
+
+    Different pyreadstat/readstat versions expose length-like metadata under
+    slightly different attribute names. Prefer storage width, then fall back to
+    display width, and finally infer from submitted values only for char vars.
+    """
+    col = safe_upper(column)
+    stype = normalize_dataset_type(storage_type)
+
+    for attr in [
+        "variable_storage_width",
+        "variable_storage_widths",
+        "storage_width",
+        "storage_widths",
+        "variable_display_width",
+        "variable_display_widths",
+    ]:
+        mp = getattr(meta, attr, None)
+        if isinstance(mp, dict):
+            for key in [column, col, str(column).lower()]:
+                val = to_int_or_none(mp.get(key))
+                if val is not None and val > 0:
+                    return val
+
+    if stype == "char" and series is not None:
+        vals = [safe_text(v) for v in series.dropna().tolist() if safe_text(v)]
+        return max([len(v) for v in vals] or [1])
+
+    return 8
 
 
 # ================================================================================================
@@ -1090,21 +1433,251 @@ def download_spec_from_sharepoint(site_name, file_path, status_callback=None):
 
     return DOWNLOAD_PATH
 
+def _norm_sheet_key(value):
+    """Normalize sheet/header names for flexible specification template handling."""
+    return re.sub(r"[^A-Z0-9]", "", safe_upper(value))
+
+
+def _find_header_row(rows, required_headers=None, max_scan=30):
+    """Return zero-based header row index by scanning the first rows."""
+    required = {_norm_sheet_key(x) for x in (required_headers or [])}
+    best_idx = None
+    best_score = -1
+    for i, row in enumerate(rows[:max_scan]):
+        keys = {_norm_sheet_key(v) for v in row if safe_text(v)}
+        if not keys:
+            continue
+        score = len(keys & required) if required else len(keys)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+        if required and required.issubset(keys):
+            return i
+    return best_idx if best_idx is not None else 0
+
+
+def _header_index_map(header_row):
+    """Build normalized-header -> column index map."""
+    mp = {}
+    for i, val in enumerate(header_row):
+        key = _norm_sheet_key(val)
+        if key and key not in mp:
+            mp[key] = i
+    return mp
+
+def _find_named_header_row(rows, header_sets=None, max_scan=40):
+    """Find the real table header row even when logos/title blocks/merged rows exist above it.
+
+    header_sets is a list of required normalized header-name sets.  A row is
+    accepted when it contains all headers in any set.  This protects imports
+    where some sheets start at row 1/2 while other sheets start at row 5/6.
+    """
+    header_sets = header_sets or []
+    norm_sets = [{_norm_sheet_key(x) for x in hs} for hs in header_sets]
+    for i, row in enumerate(rows[:max_scan]):
+        keys = {_norm_sheet_key(v) for v in row if safe_text(v)}
+        if not keys:
+            continue
+        for required in norm_sets:
+            if required and required.issubset(keys):
+                return i
+    return None
+
+
+def read_excel_detect_header(path, sheet_name, header_sets=None, dtype=str, max_scan=40):
+    """Read an Excel sheet using the detected table header row.
+
+    pandas.read_excel(header=0) fails for controlled templates with logo/title
+    rows above the table. This helper scans the first rows and reads from the
+    actual header row.
+    """
+    wb = load_workbook(path, data_only=True, read_only=True)
+    if sheet_name not in wb.sheetnames:
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return pd.DataFrame()
+    ws = wb[sheet_name]
+    rows = list(ws.iter_rows(min_row=1, max_row=max_scan, values_only=True))
+    try:
+        wb.close()
+    except Exception:
+        pass
+    header_idx = _find_named_header_row(rows, header_sets=header_sets, max_scan=max_scan)
+    if header_idx is None:
+        # Fallback: first row that has at least two nonblank cells.
+        for i, row in enumerate(rows):
+            if sum(1 for v in row if safe_text(v)) >= 2:
+                header_idx = i
+                break
+    if header_idx is None:
+        header_idx = 0
+    df = pd.read_excel(path, sheet_name=sheet_name, dtype=dtype, header=header_idx).fillna("")
+    df.columns = [safe_text(c) for c in df.columns]
+    # Remove unnamed/blank columns created by merged/logo regions.
+    df = df[[c for c in df.columns if safe_text(c) and not safe_upper(c).startswith("UNNAMED")]].copy()
+    return df
+
+
+def _row_value(row, header_map, *names):
+    for name in names:
+        idx = header_map.get(_norm_sheet_key(name))
+        if idx is not None and idx < len(row):
+            val = sas_best_text(row[idx])
+            if val != "":
+                return val
+    return ""
+
+
+def _looks_like_new_template_domain_sheet(rows):
+    """Detect TMP-BS-016 style SDTM domain sheets.
+
+    Header row contains Variable/Label/Data Type/Length/Codelist/Role/Mandatory/Origin.
+    This is different from the old A:M positional spec where Dataset is column A.
+    """
+    if not rows:
+        return False
+    idx = _find_header_row(rows, ["Variable", "Label", "Data Type"])
+    header = rows[idx] if idx is not None and idx < len(rows) else []
+    keys = {_norm_sheet_key(v) for v in header if safe_text(v)}
+    return {"VARIABLE", "LABEL", "DATATYPE"}.issubset(keys) and (
+        "CODELIST" in keys or "MANDATORY" in keys or "METHODCOMMENT" in keys or "PREDECESSORMETHODCOMMENT" in keys
+    )
+
+
 def read_domain_sheet_a_to_m_by_position(path, sheet_name):
+    """Read a domain metadata sheet and normalize it to SPEC_COLUMNS.
+
+    Supports both:
+      1) Legacy positional template: Dataset/Variable/Label/... in columns A:M.
+      2) TMP-BS-016 style template: header row has Variable, Label, Data Type,
+         Length, Codelist, Role, Mandatory, Core, Origin, Pages, Method/Comment,
+         Document, Document Pages; Dataset is inferred from sheet name.
+    """
     headers = SPEC_COLUMNS
     wb = load_workbook(path, data_only=True, read_only=True)
     if sheet_name not in wb.sheetnames:
+        try:
+            wb.close()
+        except Exception:
+            pass
         return pd.DataFrame(columns=headers)
+
     ws = wb[sheet_name]
+    rows_iter = list(ws.iter_rows(min_row=1, values_only=True))
     rows = []
-    for excel_row in ws.iter_rows(min_row=2, max_col=13, values_only=True):
-        vals = list(excel_row) + [""] * 13
+
+    # New TMP-BS-016 style: detect by header names instead of fixed positions.
+    if _looks_like_new_template_domain_sheet(rows_iter):
+        header_idx = _find_header_row(rows_iter, ["Variable", "Label", "Data Type"])
+        header_map = _header_index_map(rows_iter[header_idx])
+        ds = safe_upper(sheet_name)
+        for excel_row in rows_iter[header_idx + 1:]:
+            var = safe_upper(_row_value(excel_row, header_map, "Variable", "Variable Name"))
+            if not var or var in {"VARIABLE", "VARIABLE NAME"}:
+                continue
+            if all(safe_text(v) == "" for v in excel_row):
+                continue
+
+            mandatory = _row_value(excel_row, header_map, "Mandatory")
+            core = _row_value(excel_row, header_map, "Core") or mandatory
+            pages = _row_value(excel_row, header_map, "Pages", "Page", "CRF Pages")
+            method_comment = _row_value(
+                excel_row,
+                header_map,
+                "Predecessor/Method/Comment",
+                "Predecessor Method Comment",
+                "PredecessorMethodComment",
+                "Method/Comment",
+                "Method Comment",
+                "Comment",
+                "Comments",
+            )
+            document = _row_value(excel_row, header_map, "Document")
+            doc_pages = _row_value(excel_row, header_map, "Document Pages", "Page Reference")
+
+            # TMP-BS-016 mapping is intentionally clean:
+            #   J / Pages                         -> CRF PageRef only
+            #   K / Predecessor/Method/Comment    -> Define Comments/Method text
+            #   L / Programming Notes             -> ignored
+            #   M-N / Document fields             -> not folded into comments
+            # Do not append page numbers or document notes into Comments.
+
+            rec = {
+                "Dataset": ds,
+                "Variable": var,
+                "Label": _row_value(excel_row, header_map, "Label"),
+                "ID Var": "",
+                "Keep": "1",
+                "Type": normalize_dataset_type(_row_value(excel_row, header_map, "Data Type", "Type")) or _row_value(excel_row, header_map, "Data Type", "Type"),
+                "Len": _row_value(excel_row, header_map, "Length", "Len"),
+                "Control or Format": _row_value(excel_row, header_map, "Codelist", "Control or Format", "Format"),
+                "Term": "",
+                "Core": core,
+                "Role": _row_value(excel_row, header_map, "Role"),
+                "Origin": _row_value(excel_row, header_map, "Origin"),
+                "Pages": pages,
+                "Comments": method_comment,
+            }
+            rows.append(rec)
+
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return pd.DataFrame(rows, columns=headers)
+
+    # Legacy positional reader with dynamic header-row detection.
+    # Some controlled templates have logo/title rows above the table, so data
+    # may start from row 2 in one domain and row 6 in another.
+    header_idx = _find_named_header_row(
+        rows_iter,
+        header_sets=[
+            ["Dataset", "Variable"],
+            ["Domain", "Variable"],
+            ["Variable", "Label"],
+        ],
+        max_scan=40,
+    )
+    if header_idx is None:
+        header_idx = 0
+
+    header_map = _header_index_map(rows_iter[header_idx])
+    use_named_legacy = bool(header_map.get(_norm_sheet_key("Variable")) is not None)
+
+    for excel_row in rows_iter[header_idx + 1:]:
+        vals = list(excel_row) + [""] * 20
         # Use SAS-like numeric rendering so Excel numeric cells such as
         # KEEP=1.0, ID Var=2.0, Len=200.0 are stored/displayed as 1, 2, 200.
-        # Character values are preserved as-is.
-        rec = {h: sas_best_text(vals[i]) for i, h in enumerate(headers)}
-        if not rec["Dataset"]:
-            rec["Dataset"] = sheet_name.upper()
+        rec = {h: "" for h in headers}
+
+        if use_named_legacy:
+            rec["Dataset"] = _row_value(excel_row, header_map, "Dataset", "Domain") or sheet_name.upper()
+            rec["Variable"] = _row_value(excel_row, header_map, "Variable", "Variable Name")
+            rec["Label"] = _row_value(excel_row, header_map, "Label", "Description", "Label / Description")
+            rec["ID Var"] = _row_value(excel_row, header_map, "ID Var", "KeySequence", "Key Sequence")
+            rec["Keep"] = _row_value(excel_row, header_map, "Keep") or "1"
+            rec["Type"] = normalize_dataset_type(_row_value(excel_row, header_map, "Data Type", "Type")) or _row_value(excel_row, header_map, "Data Type", "Type")
+            rec["Len"] = _row_value(excel_row, header_map, "Length", "Len")
+            rec["Control or Format"] = _row_value(excel_row, header_map, "Codelist", "Control or Format", "Format", "Controlled Terms or ISO Format")
+            rec["Term"] = _row_value(excel_row, header_map, "Term")
+            rec["Core"] = _row_value(excel_row, header_map, "Core", "Mandatory")
+            rec["Role"] = _row_value(excel_row, header_map, "Role")
+            rec["Origin"] = _row_value(excel_row, header_map, "Origin")
+            rec["Pages"] = _row_value(excel_row, header_map, "Pages", "Page", "CRF Pages")
+            rec["Comments"] = _row_value(excel_row, header_map, "Comments", "Comment", "Method/Comment", "Predecessor/Method/Comment")
+        else:
+            legacy_headers = [
+                "Dataset", "Variable", "Label", "ID Var", "Keep", "Type", "Len",
+                "Control or Format", "Term", "Core", "Role", "Origin", "Comments"
+            ]
+            for i, h in enumerate(legacy_headers):
+                rec[h] = sas_best_text(vals[i])
+            rec["Pages"] = ""
+            if not rec["Dataset"]:
+                rec["Dataset"] = sheet_name.upper()
+
         if all(rec[h] == "" for h in headers):
             continue
         if not rec["Variable"] or rec["Variable"].upper() in {"VARIABLE", "VARIABLE NAME"}:
@@ -1115,7 +1688,6 @@ def read_domain_sheet_a_to_m_by_position(path, sheet_name):
     except Exception:
         pass
     return pd.DataFrame(rows, columns=headers)
-
 
 def normalize_header_name(value):
     txt = safe_text(value).lower()
@@ -1144,22 +1716,36 @@ def normalize_header_name(value):
         "comments": "Documentation",
         "location": "Location",
         "xpt": "Location",
+        "key_variables": "Keys",
+        "repeating": "Repeating",
+        "reference_data": "Reference Data",
+        "document_pages": "Documentation",
     }
     return aliases.get(txt, safe_text(value))
 
 
 def read_domains_sheet(path):
-    """Read the Domains sheet used to populate the Define datasets table."""
+    """Read the Domains/Datasets sheet used to populate the Define datasets table.
+
+    Supports legacy sheet name "Domains" and TMP-BS-016 sheet name "Datasets".
+    """
     wb = load_workbook(path, data_only=True, read_only=True)
-    if "Domains" not in wb.sheetnames and "DOMAINS" not in [s.upper() for s in wb.sheetnames]:
+    candidate = ""
+    for wanted in ["DOMAINS", "DATASETS"]:
+        for s in wb.sheetnames:
+            if safe_upper(s) == wanted:
+                candidate = s
+                break
+        if candidate:
+            break
+    if not candidate:
         try:
             wb.close()
         except Exception:
             pass
         return pd.DataFrame(columns=DOMAIN_COLUMNS)
-    sheet_name = next(s for s in wb.sheetnames if s.upper() == "DOMAINS")
-    ws = wb[sheet_name]
 
+    ws = wb[candidate]
     rows_iter = list(ws.iter_rows(min_row=1, values_only=True))
     if not rows_iter:
         try:
@@ -1170,7 +1756,7 @@ def read_domains_sheet(path):
 
     # Find the header row. Usually it contains Dataset/Domain and Description.
     header_idx = 0
-    for i, row in enumerate(rows_iter[:20]):
+    for i, row in enumerate(rows_iter[:30]):
         vals = [normalize_header_name(v) for v in row]
         if "Dataset" in vals and any(v in vals for v in ["Description", "Structure", "Class", "Purpose"]):
             header_idx = i
@@ -1180,9 +1766,15 @@ def read_domains_sheet(path):
     data_rows = []
     for row in rows_iter[header_idx + 1:]:
         rec = {c: "" for c in DOMAIN_COLUMNS}
+        # Repeating and Reference Data are written to ItemGroupDef attributes later.
+        # Do not fold them into Documentation; otherwise the XSL shows them as comments
+        # under the Documentation column.
         for j, val in enumerate(row):
-            if j < len(headers) and headers[j] in rec:
-                rec[headers[j]] = safe_text(val)
+            if j >= len(headers):
+                continue
+            h = headers[j]
+            if h in rec:
+                rec[h] = safe_text(val)
         rec["Dataset"] = safe_upper(rec.get("Dataset"))
         if not rec["Dataset"] or rec["Dataset"] in {"DATASET", "DOMAIN"}:
             continue
@@ -1190,6 +1782,7 @@ def read_domains_sheet(path):
         if not safe_text(rec.get("Subclass")):
             rec["Subclass"] = default_dataset_subclass(rec.get("Dataset"), rec.get("Class"), rec.get("Structure"), "SDTM")
         rec["Has No Data"] = yes_no(rec.get("Has No Data"), default="No")
+        rec["Documentation"] = safe_text(rec.get("Documentation"))
         # Force standard SUPP/SQ dataset metadata for the Define datasets table.
         if is_supp_qual_dataset(rec["Dataset"]):
             parent = supp_parent_domain(rec["Dataset"])
@@ -1209,21 +1802,83 @@ def read_domains_sheet(path):
     return pd.DataFrame(data_rows, columns=DOMAIN_COLUMNS)
 
 
+def split_key_variables(value):
+    """Split Datasets sheet Key Variables into ordered variable names."""
+    txt = safe_text(value)
+    if not txt:
+        return []
+    # Accept comma, semicolon, slash, plus, newline, or repeated spaces.
+    parts = re.split(r"[,;\n/+]\s*|\s{2,}", txt)
+    out = []
+    for part in parts:
+        for token in re.split(r"\s+", safe_text(part)):
+            var = safe_upper(token.strip())
+            if var and var not in {"AND", "OR"} and var not in out:
+                out.append(var)
+    return out
+
+
+def apply_dataset_keys_to_spec(spec_df, domains_df):
+    """Populate ID Var/KeySequence from Domains/Datasets sheet Key Variables.
+
+    Priority rule for keys:
+      1) If the Domains/Datasets sheet has Key Variables for a dataset, those
+         keys are the source of truth and overwrite any key values coming from
+         individual domain sheets.
+      2) If the dataset has no Key Variables in Domains/Datasets, leave existing
+         ID Var values unchanged; XPT-based fallback will populate only when all
+         keys are blank.
+
+    XPT files do not contain key metadata, so XPT fallback is pattern-based only
+    and must never override explicit Datasets-sheet keys.
+    """
+    if not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
+        return spec_df
+    if not isinstance(domains_df, pd.DataFrame) or domains_df.empty or "Keys" not in domains_df.columns:
+        return spec_df
+
+    key_map = {}
+    for _, drow in domains_df.iterrows():
+        ds = safe_upper(drow.get("Dataset"))
+        keys = split_key_variables(drow.get("Keys"))
+        if ds and keys:
+            key_map[ds] = {var: str(i + 1) for i, var in enumerate(keys)}
+
+    if not key_map:
+        return spec_df
+
+    out = spec_df.copy()
+    if "ID Var" not in out.columns:
+        out["ID Var"] = ""
+
+    # Dataset-sheet keys win. For datasets with explicit Key Variables, clear
+    # any domain-sheet/spec key values first, then assign only the listed keys.
+    for ds, var_seq in key_map.items():
+        ds_mask = out["Dataset"].apply(safe_upper) == ds
+        if not ds_mask.any():
+            continue
+        out.loc[ds_mask, "ID Var"] = ""
+        for var, seq in var_seq.items():
+            vmask = ds_mask & (out["Variable"].apply(safe_upper) == var)
+            out.loc[vmask, "ID Var"] = seq
+
+    return out
+
 
 def read_value_metadata_sheet(path):
-    """Read the SharePoint spec ValueMetadata sheet for user-maintained VLM.
+    """Read ValueMetadata / ValueLevel from mixed specification templates.
 
-    The sheet name is matched case-insensitively as ValueMetadata / VALUE METADATA.
-    Missing expected columns are added as blanks and expected VLM columns are
-    ordered first. Extra review columns, if any, are preserved after the standard
-    columns.
+    Handles both internal ValueMetadata sheets and TMP-BS-016 ValueLevel sheets.
+    TMP-BS-016 columns such as Variable, Data Type, Length, Method/Comment,
+    Conditional Variable, Comparator, Value, Label, and Where Clause are mapped
+    into the internal VLM_COLUMNS used for Define-XML generation.
     """
     try:
         wb = load_workbook(path, data_only=True, read_only=True)
         sheet_name = ""
         for s in wb.sheetnames:
             norm = re.sub(r"[^A-Z0-9]", "", safe_upper(s))
-            if norm == "VALUEMETADATA":
+            if norm in {"VALUEMETADATA", "VALUELEVEL", "VALUELEVELMETADATA", "VALUELEVELS"}:
                 sheet_name = s
                 break
         try:
@@ -1233,16 +1888,162 @@ def read_value_metadata_sheet(path):
         if not sheet_name:
             return pd.DataFrame(columns=VLM_COLUMNS)
 
-        df = pd.read_excel(path, sheet_name=sheet_name, dtype=str).fillna("")
+        df = read_excel_detect_header(
+            path,
+            sheet_name,
+            header_sets=[
+                ["Dataset", "Grouping Variable", "Result Variable"],
+                ["Dataset", "Where Clause", "Result Variable"],
+                ["Dataset", "Variable", "Data Type"],
+                ["Dataset", "Conditional Variable", "Comparator", "Value"],
+            ],
+            dtype=str,
+            max_scan=50,
+        ).fillna("")
         df.columns = [safe_text(c) for c in df.columns]
-        # Drop fully blank rows.
-        if not df.empty:
-            df = df.loc[~df.apply(lambda r: all(safe_text(v) == "" for v in r), axis=1)].copy()
-        for c in VLM_COLUMNS:
-            if c not in df.columns:
-                df[c] = ""
-        ordered = VLM_COLUMNS + [c for c in df.columns if c not in VLM_COLUMNS]
-        return df[ordered].copy()
+        if df.empty:
+            return pd.DataFrame(columns=VLM_COLUMNS)
+
+        # Drop fully blank/template rows.
+        df = df.loc[~df.apply(lambda r: all(safe_text(v) == "" for v in r), axis=1)].copy()
+        if df.empty:
+            return pd.DataFrame(columns=VLM_COLUMNS)
+
+        # Header lookup independent of spacing, slash, case, or merged-row artefacts.
+        col_by_norm = {_norm_sheet_key(c): c for c in df.columns if safe_text(c)}
+
+        def col(*names):
+            for name in names:
+                c = col_by_norm.get(_norm_sheet_key(name))
+                if c is not None:
+                    return c
+            return None
+
+        def val(row, *names):
+            c = col(*names)
+            return safe_text(row.get(c)) if c else ""
+
+        # Already in internal format: normalize/order and return.
+        if col("Grouping Variable") and col("Result Variable"):
+            out = df.copy()
+            for c in VLM_COLUMNS:
+                if c not in out.columns:
+                    out[c] = ""
+            out["Dataset"] = out["Dataset"].apply(safe_upper)
+            out["Result Variable"] = out["Result Variable"].apply(safe_upper)
+            out["Grouping Variable"] = out["Grouping Variable"].apply(safe_upper)
+            if "Type" in out.columns:
+                out["Type"] = out["Type"].apply(lambda x: normalize_dataset_type(x) or safe_text(x))
+
+            # Some ValueMetadata templates contain additional conditions as
+            # Variable 2/Value 2, Variable 3/Value 3, etc.  Map them into the
+            # internal Grouping Variable 1-4 columns even when the sheet already
+            # has Grouping Variable/Result Variable columns.
+            for idx, n in enumerate(range(2, 6), start=1):
+                gv_src = col(f"Grouping Variable {n}", f"Conditional Variable {n}", f"Variable {n}")
+                vv_src = col(f"Group Value {n}", f"Conditional Value {n}", f"Value {n}")
+                if gv_src and vv_src:
+                    out[f"Grouping Variable {idx}"] = out[gv_src].apply(safe_upper)
+                    out[f"Group Value {idx}"] = out[vv_src].apply(safe_text)
+
+            # If Where Clause only has the primary condition, rebuild display
+            # text from all grouping pairs so the Define reviewer does not show
+            # repeated IDs like FAORRES where FATESTCD.EQ.OCCUR.
+            def _full_wc(r):
+                pairs = []
+                gv = safe_upper(r.get("Grouping Variable")); vv = safe_text(r.get("Group Value"))
+                if gv and vv:
+                    pairs.append((gv, vv))
+                for j in range(1, 5):
+                    gv = safe_upper(r.get(f"Grouping Variable {j}")); vv = safe_text(r.get(f"Group Value {j}"))
+                    if gv and vv:
+                        pairs.append((gv, vv))
+                return " AND ".join([f"{a}.EQ.{b}" for a, b in pairs]) if pairs else safe_text(r.get("Where Clause"))
+
+            out["Where Clause"] = out.apply(_full_wc, axis=1)
+            ordered = VLM_COLUMNS + [c for c in out.columns if c not in VLM_COLUMNS]
+            return out[ordered].copy()
+
+        # TMP-BS-016 ValueLevel mapping.
+        rows = []
+        for _, r in df.iterrows():
+            ds = safe_upper(val(r, "Dataset", "Domain"))
+            result_var = safe_upper(val(r, "Result Variable", "Variable", "Variable Name"))
+            if not ds or not result_var or result_var in {"VARIABLE", "RESULT VARIABLE"}:
+                continue
+
+            grouping_var = safe_upper(val(r, "Grouping Variable", "Conditional Variable"))
+            comparator = safe_upper(val(r, "Comparator", "Operator"))
+            group_value = val(r, "Group Value", "Value", "Conditional Value")
+
+            # TMP-BS-016 ValueLevel can carry additional where conditions in
+            # Conditional Variable 2/3/4 + Comparator 2/3/4 + Value 2/3/4.
+            # These must become additional VLM grouping pairs; otherwise rows
+            # such as EGTESTCD=INTP with different EGMETHOD values collapse to
+            # the same VLM key and look duplicated/overwritten in Define.
+            extra_pairs = []
+            for n in range(2, 6):
+                gv_n = safe_upper(val(r, f"Grouping Variable {n}", f"Conditional Variable {n}", f"Variable {n}"))
+                cmp_n = safe_upper(val(r, f"Comparator {n}", f"Operator {n}"))
+                val_n = val(r, f"Group Value {n}", f"Value {n}", f"Conditional Value {n}")
+                if gv_n and val_n:
+                    extra_pairs.append((gv_n, cmp_n or "EQ", val_n))
+
+            where_clause = val(r, "Where Clause")
+            if not where_clause:
+                clause_parts = []
+                if grouping_var and group_value:
+                    clause_parts.append(f"{ds}.{grouping_var}.{comparator or 'EQ'}.{group_value}")
+                for gv_n, cmp_n, val_n in extra_pairs:
+                    clause_parts.append(f"{ds}.{gv_n}.{cmp_n or 'EQ'}.{val_n}")
+                where_clause = " AND ".join(clause_parts)
+
+            fmt = val(r, "Format", "Codelist", "Controlled Terms or ISO Format", "Control or Format")
+            comment = val(r, "Comment", "Comments", "Method/Comment", "Method Comment", "Predecessor/Method/Comment")
+
+            rec = {
+                "Dataset": ds,
+                "Grouping Variable": grouping_var,
+                "Group Value": group_value,
+                "Group Label": val(r, "Group Label", "Label", "Decode", "Decoded Value"),
+                "Grouping Variable 1": "",
+                "Group Value 1": "",
+                "Grouping Variable 2": "",
+                "Group Value 2": "",
+                "Grouping Variable 3": "",
+                "Group Value 3": "",
+                "Grouping Variable 4": "",
+                "Group Value 4": "",
+                "Where Clause": where_clause,
+                "Result Variable": result_var,
+                "Length": val(r, "Length", "Len"),
+                "Type": normalize_dataset_type(val(r, "Type", "Data Type")) or val(r, "Type", "Data Type"),
+                "Format": fmt,
+                "Origin": val(r, "Origin"),
+                "Source": val(r, "Source"),
+                "Role": val(r, "Role"),
+                "Comment": comment,
+            }
+            # Internal VLM columns are numbered from 1 after the primary
+            # Grouping Variable/Group Value pair.
+            for idx, (gv_n, _cmp_n, val_n) in enumerate(extra_pairs[:4], start=1):
+                rec[f"Grouping Variable {idx}"] = gv_n
+                rec[f"Group Value {idx}"] = val_n
+            rows.append(rec)
+
+        out = pd.DataFrame(rows, columns=VLM_COLUMNS)
+        if out.empty:
+            return pd.DataFrame(columns=VLM_COLUMNS)
+        # Keep genuinely different multi-condition records, but remove exact
+        # duplicate template rows so Define does not contain repeated ItemDefs.
+        dedupe_cols = [
+            "Dataset", "Result Variable", "Grouping Variable", "Group Value",
+            "Grouping Variable 1", "Group Value 1", "Grouping Variable 2", "Group Value 2",
+            "Grouping Variable 3", "Group Value 3", "Grouping Variable 4", "Group Value 4",
+            "Where Clause"
+        ]
+        out = out.drop_duplicates(subset=[c for c in dedupe_cols if c in out.columns], keep="first").copy()
+        return out.copy()
     except Exception:
         return pd.DataFrame(columns=VLM_COLUMNS)
 
@@ -1279,7 +2080,13 @@ def read_documents_sheet(path):
     if not sheet_name:
         return pd.DataFrame(columns=DOCUMENTS_COLUMNS)
     try:
-        df = pd.read_excel(path, sheet_name=sheet_name, dtype=str).fillna("")
+        df = read_excel_detect_header(
+            path,
+            sheet_name,
+            header_sets=[["ID", "Title", "Href"], ["Document ID", "Title", "Href"]],
+            dtype=str,
+            max_scan=40,
+        ).fillna("")
         df.columns = [safe_text(c) for c in df.columns]
         rename = {}
         for c in df.columns:
@@ -1318,7 +2125,13 @@ def read_document_links_sheet(path):
     if not sheet_name:
         return pd.DataFrame(columns=DOCUMENT_LINKS_COLUMNS)
     try:
-        df = pd.read_excel(path, sheet_name=sheet_name, dtype=str).fillna("")
+        df = read_excel_detect_header(
+            path,
+            sheet_name,
+            header_sets=[["ID", "Document", "Pages"], ["Object ID", "Document", "Pages"]],
+            dtype=str,
+            max_scan=40,
+        ).fillna("")
         df.columns = [safe_text(c) for c in df.columns]
         rename = {}
         for c in df.columns:
@@ -1349,12 +2162,28 @@ def read_all_sheets(path):
         wb.close()
     except Exception:
         pass
+
+    # If a Domains/Datasets sheet is present, restrict domain metadata import to listed datasets.
+    # This prevents class/template sheets such as Interventions, Events, Findings, SUPP--,
+    # Codelists, ValueLevel, and Documents from being pulled as fake datasets.
+    allowed = set()
+    try:
+        ddf = read_domains_sheet(path)
+        if isinstance(ddf, pd.DataFrame) and not ddf.empty and "Dataset" in ddf.columns:
+            allowed = {safe_upper(x) for x in ddf["Dataset"].tolist() if safe_text(x)}
+    except Exception:
+        allowed = set()
+
     out = {}
     for sheet in sheets:
         try:
+            su = safe_upper(sheet)
+            if allowed and su not in allowed:
+                out[sheet] = pd.DataFrame(columns=SPEC_COLUMNS)
+                continue
             out[sheet] = read_domain_sheet_a_to_m_by_position(path, sheet)
         except Exception:
-            out[sheet] = pd.DataFrame()
+            out[sheet] = pd.DataFrame(columns=SPEC_COLUMNS)
     return out
 
 
@@ -1385,6 +2214,101 @@ def build_supp_rows_from_template(path, supp_dataset):
     out["Keep"] = "1"
     out["Variable"] = out["Variable"].apply(safe_text)
     return out[out["Variable"] != ""].copy()
+
+
+def read_supp_template_sheet(path):
+    """Read the supplemental qualifier template sheet.
+
+    Supported sheet names:
+      - SUPP--  : TMP-BS-016 SDTM template
+      - SUPP_TEMP / SUPPQUAL : older internal templates
+
+    The returned rows still have Dataset populated from the template sheet; the
+    caller replaces Dataset with the actual XPT dataset name, such as SUPPAE.
+    """
+    for sheet in ["SUPP--", "SUPP_TEMP", "SUPPQUAL"]:
+        try:
+            df = read_domain_sheet_a_to_m_by_position(path, sheet)
+        except Exception:
+            df = pd.DataFrame(columns=SPEC_COLUMNS)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            df = df.copy()
+            for col in SPEC_COLUMNS:
+                if col not in df.columns:
+                    df[col] = ""
+            return df[SPEC_COLUMNS].copy()
+    return pd.DataFrame(columns=SPEC_COLUMNS)
+
+
+def build_supp_rows_from_xpt_metadata(path, dataset_metadata, existing_spec=None):
+    """Create SUPP/SQ metadata rows from the SUPP-- template and actual XPT metadata.
+
+    This is intentionally XPT-driven.  For every selected SUPP*/SQ* XPT dataset,
+    create rows only for variables physically present in that XPT.  The SUPP--
+    sheet supplies standard labels/roles/origins/codelists, but XPT metadata is
+    given priority later in build_metadata_editor for type, length, order, and
+    physical presence.  If a SUPP XPT contains a non-template variable, keep it
+    visible by creating a minimal spec row from the XPT metadata.
+    """
+    if dataset_metadata is None or getattr(dataset_metadata, "empty", True):
+        return pd.DataFrame(columns=SPEC_COLUMNS)
+
+    dmeta = dataset_metadata.copy()
+    if "Dataset" not in dmeta.columns or "Variable" not in dmeta.columns:
+        return pd.DataFrame(columns=SPEC_COLUMNS)
+    dmeta["Dataset"] = dmeta["Dataset"].apply(safe_upper)
+    dmeta["Variable"] = dmeta["Variable"].apply(safe_upper)
+
+    supp_datasets = sorted({ds for ds in dmeta["Dataset"].tolist() if is_supp_qual_dataset(ds)})
+    if not supp_datasets:
+        return pd.DataFrame(columns=SPEC_COLUMNS)
+
+    existing_keys = set()
+    if isinstance(existing_spec, pd.DataFrame) and not existing_spec.empty:
+        tmp = existing_spec.copy()
+        if "Dataset" in tmp.columns and "Variable" in tmp.columns:
+            tmp["Dataset"] = tmp["Dataset"].apply(safe_upper)
+            tmp["Variable"] = tmp["Variable"].apply(safe_upper)
+            existing_keys = set(zip(tmp["Dataset"], tmp["Variable"]))
+
+    tmpl = read_supp_template_sheet(path)
+    if tmpl.empty:
+        tmpl = pd.DataFrame(columns=SPEC_COLUMNS)
+
+    tmpl = tmpl.copy()
+    tmpl["Variable"] = tmpl["Variable"].apply(safe_upper)
+    tmpl_lookup = {safe_upper(r.get("Variable")): r for _, r in tmpl.iterrows() if safe_text(r.get("Variable"))}
+
+    rows = []
+    for supp_ds in supp_datasets:
+        ds_meta = dmeta[dmeta["Dataset"] == supp_ds].copy()
+        for _, m in ds_meta.sort_values("Order" if "Order" in ds_meta.columns else "Variable").iterrows():
+            var = safe_upper(m.get("Variable"))
+            if not var or (supp_ds, var) in existing_keys:
+                continue
+
+            base = tmpl_lookup.get(var)
+            if base is not None:
+                rec = {col: sas_best_text(base.get(col)) for col in SPEC_COLUMNS}
+            else:
+                # Non-standard/extra physical variable in the SUPP XPT.  Do not hide it.
+                rec = {col: "" for col in SPEC_COLUMNS}
+                rec["Variable"] = var
+                rec["Label"] = safe_text(m.get("Label"))
+                rec["Type"] = safe_text(m.get("Data Type")) or safe_text(m.get("Storage Type"))
+                rec["Len"] = safe_text(m.get("Data Length"))
+                rec["Origin"] = "Assigned"
+                rec["Role"] = "Record Qualifier" if var.startswith("Q") else "Identifier"
+                rec["Comments"] = "Added from SUPP XPT metadata; variable was not present in SUPP-- template."
+
+            rec["Dataset"] = supp_ds
+            rec["Variable"] = var
+            rec["Keep"] = "1"
+            rows.append(rec)
+
+    if not rows:
+        return pd.DataFrame(columns=SPEC_COLUMNS)
+    return pd.DataFrame(rows, columns=SPEC_COLUMNS)
 
 
 def read_dataset_file(path, metadataonly=False):
@@ -1758,22 +2682,188 @@ def _json_get_any(obj, keys):
     return ""
 
 
+def _extract_first_nci_code(value):
+    """Extract first NCI C-code from CDISC Library href/title/id text."""
+    txt = safe_text(value)
+    m = re.search(r"\bC\d{3,}\b", txt, flags=re.I)
+    return m.group(0).upper() if m else ""
+
+
+def _iter_json_strings(obj):
+    """Yield all string values from a nested JSON object."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str):
+                yield k
+            yield from _iter_json_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_json_strings(v)
+    elif isinstance(obj, str):
+        yield obj
+
+
+def _ct_codelist_keys_from_obj(d):
+    """Return possible codelist submission keys from varied CDISC Library payloads.
+
+    The CDISC Library /codelists payload can vary by version/endpoint.  Some
+    responses expose submissionValue='FRM', while others expose links/titles
+    like CL.C66726.FRM.  Use all reliable keys so formats such as FRM, UNIT,
+    ROUTE and FREQ resolve generically instead of appearing with [*].
+    """
+    if not isinstance(d, dict):
+        return []
+    vals = []
+    for k in [
+        "submissionValue", "submission_value", "codelistSubmissionValue",
+        "cdiscSubmissionValue", "shortName", "name", "label", "preferredTerm"
+    ]:
+        v = safe_text(d.get(k))
+        if v:
+            vals.append(v)
+
+    for txt in _iter_json_strings(d):
+        # Examples seen across CDISC payloads / CT browser exports:
+        #   CL.C66726.FRM
+        #   /mdr/ct/packages/.../codelists/C66726
+        #   C66726.FRM
+        for m in re.finditer(r"\bCL[._-]C\d{3,}[._-]([A-Za-z][A-Za-z0-9_-]*)\b", txt, flags=re.I):
+            vals.append(m.group(1))
+        for m in re.finditer(r"\bC\d{3,}[._-]([A-Za-z][A-Za-z0-9_-]{1,20})\b", txt, flags=re.I):
+            cand = m.group(1)
+            # Keep acronym-style codelist keys, not long English labels.
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,12}", cand):
+                vals.append(cand)
+
+    out = []
+    for v in vals:
+        txt = safe_text(v)
+        # If the full OID/title was captured, reduce to the final codelist key.
+        m = re.search(r"\bCL[._-]C\d{3,}[._-]([A-Za-z][A-Za-z0-9_-]*)\b", txt, flags=re.I)
+        if m:
+            txt = m.group(1)
+        elif re.fullmatch(r"C\d{3,}[._-][A-Za-z][A-Za-z0-9_-]*", txt, flags=re.I):
+            txt = re.split(r"[._-]", txt, maxsplit=1)[1]
+        txt = normalize_ct_lookup_key(txt)
+        if txt and txt not in out:
+            out.append(txt)
+    return out
+
+
+def _ct_codelist_nci_from_obj(d):
+    """Return the *codelist-level* NCI code from CDISC Library payloads.
+
+    Important: do not scan every nested string in the object.  A full codelist
+    payload contains many term objects, and the first nested C-code can be a
+    term such as UNKNOWN (C17998).  That was being incorrectly assigned as the
+    CodeList Alias for UNIT and other codelists, causing DD0118.
+
+    Only use direct codelist identifiers or codelist/self links that point to
+    /codelists/Cxxxx.  Term-level C-codes are handled separately by
+    _ct_term_nci_from_obj().
+    """
+    if not isinstance(d, dict):
+        return ""
+
+    # Direct codelist-level fields first.  Exclude generic term-oriented fields
+    # unless the object also looks like a codelist (has terms or codelist links).
+    for k in ["codelistCode", "codelistNciCode", "conceptId", "nciCode"]:
+        nci = _extract_first_nci_code(d.get(k)) or safe_text(d.get(k))
+        if re.fullmatch(r"C\d{3,}", safe_text(nci), flags=re.I):
+            return safe_text(nci).upper()
+
+    links = d.get("_links", {}) if isinstance(d.get("_links", {}), dict) else {}
+    link_values = []
+    for link_name in ["self", "codelist", "parent"]:
+        link = links.get(link_name)
+        if isinstance(link, dict):
+            link_values.append(safe_text(link.get("href")))
+        elif isinstance(link, list):
+            for li in link:
+                if isinstance(li, dict):
+                    link_values.append(safe_text(li.get("href")))
+
+    for hk in ["href", "url", "uri", "id"]:
+        link_values.append(safe_text(d.get(hk)))
+
+    for txt in link_values:
+        # Accept only codelist-level URLs/OIDs, not term URLs.
+        m = re.search(r"/codelists/(C\d{3,})(?:$|[/?#])", txt, flags=re.I)
+        if m:
+            return m.group(1).upper()
+        m = re.search(r"\bCL[._-](C\d{3,})(?:[._-]|$)", txt, flags=re.I)
+        if m:
+            return m.group(1).upper()
+
+    return ""
+
+
+def _ct_term_code_from_obj(t):
+    """Return a CT term submission value from varied CDISC Library payloads."""
+    if not isinstance(t, dict):
+        return ""
+    for k in [
+        "submissionValue", "codedValue", "cdiscSubmissionValue",
+        "termSubmissionValue", "value"
+    ]:
+        v = safe_text(t.get(k))
+        if v:
+            return v
+    # Avoid using long names as submission values unless no better value exists.
+    for k in ["name", "label", "preferredTerm"]:
+        v = safe_text(t.get(k))
+        if v and len(v) <= 80:
+            return v
+    return ""
+
+
+def _ct_term_nci_from_obj(t):
+    """Return term NCI code from varied CDISC Library payloads."""
+    if not isinstance(t, dict):
+        return ""
+    for k in ["conceptId", "nciCode", "termCode", "code", "id"]:
+        nci = _extract_first_nci_code(t.get(k)) or safe_text(t.get(k))
+        if re.fullmatch(r"C\d{3,}", safe_text(nci), flags=re.I):
+            return safe_text(nci).upper()
+    for txt in _iter_json_strings(t):
+        nci = _extract_first_nci_code(txt)
+        if nci:
+            return nci
+    return ""
+
+
+def _ct_add_or_update_codelist(out, keys, codelist_code=""):
+    """Create/update CT map entries for all equivalent codelist keys."""
+    keys = [normalize_ct_lookup_key(k) for k in (keys or []) if safe_text(k)]
+    keys = [k for i, k in enumerate(keys) if k and k not in keys[:i]]
+    if not keys:
+        return None
+    primary = keys[0]
+    if primary not in out:
+        out[primary] = {"codelist_code": "", "terms": {}, "synonyms": {}}
+    if codelist_code and not safe_text(out[primary].get("codelist_code")):
+        out[primary]["codelist_code"] = codelist_code
+    for k in keys[1:]:
+        if k not in out:
+            out[k] = out[primary]
+        else:
+            # Merge any existing content into primary, then alias back to primary.
+            if not out[primary].get("codelist_code") and out[k].get("codelist_code"):
+                out[primary]["codelist_code"] = out[k].get("codelist_code")
+            out[primary].setdefault("terms", {}).update(out[k].get("terms", {}) or {})
+            out[primary].setdefault("synonyms", {}).update(out[k].get("synonyms", {}) or {})
+            out[k] = out[primary]
+    return out[primary]
+
+
 def fetch_cdisc_library_ct_map(api_key, ct_version, standard="SDTM", status_callback=None):
     """Fetch CT codelist and term NCI codes from CDISC Library.
 
-    Returns:
-      {
-        "FREQ": {
-            "codelist_code": "C71113",
-            "terms": {"QD": "C25473", ...},
-            "synonyms": {"QD": "Once Daily", ...}
-        },
-        ...
-      }
+    Returns a generic lookup keyed by codelist submission value, for example:
+      {"FRM": {"codelist_code": "C66726", "terms": {"INJECTION": "..."}}}
 
-    This is deliberately defensive because CDISC Library response shapes can vary by endpoint/version.
-    If the API key/version is missing or the service cannot be reached, an empty map is returned and
-    define generation continues without NCI aliases.
+    The parser is intentionally defensive because CDISC Library payloads vary by
+    endpoint/version. It reads both embedded codelists and linked codelists/terms.
     """
     api_key = safe_text(api_key)
     ct_version = safe_text(ct_version)
@@ -1805,92 +2895,170 @@ def fetch_cdisc_library_ct_map(api_key, ct_version, standard="SDTM", status_call
             for v in x:
                 yield from iter_dicts(v)
 
-    def looks_like_codelist(d):
-        return bool(_json_get_any(d, ["submissionValue", "name", "preferredTerm", "label"])) and (
-            "terms" in d or "terms" in {safe_text(k).lower(): v for k, v in d.items()}
-            or "conceptId" in d or "nciCode" in d or "code" in d
-        )
+    def collect_terms_into(info, term_payload):
+        if not isinstance(info, dict):
+            return
+        for td in iter_dicts(term_payload):
+            if not isinstance(td, dict):
+                continue
+            code = _ct_term_code_from_obj(td)
+            nci = _ct_term_nci_from_obj(td)
+            if code:
+                if nci:
+                    info.setdefault("terms", {})[code] = nci
+                syn = extract_cdisc_synonyms_from_term(td)
+                if syn:
+                    info.setdefault("synonyms", {})[code] = syn
 
     out = {}
     try:
-        payload = None
+        payloads = []
         last_err = None
         for url in urls:
             try:
-                payload = request_json(url)
-                break
+                payloads.append(request_json(url))
             except Exception as e:
                 last_err = e
                 continue
-        if payload is None:
+        if not payloads:
             if status_callback:
                 status_callback(f"CDISC Library CT lookup skipped/failed: {last_err}")
             return {}
 
-        # Find probable codelist objects.
+        payload = {"_combined_payloads": payloads}
+
+        # First pass: collect all codelists and any embedded terms.
+        codelist_objects = []
         for d in iter_dicts(payload):
-            sv = safe_upper(_json_get_any(d, ["submissionValue", "submission_value", "name"]))
-            if not sv:
+            if not isinstance(d, dict):
                 continue
-            # Ignore term-level objects without nested terms when possible.
-            terms_obj = d.get("terms") or d.get("_links", {}).get("terms") or d.get("concepts") or d.get("items")
-            cl_code = safe_text(_json_get_any(d, ["conceptId", "nciCode", "codelistCode", "code"]))
-            if sv not in out:
-                out[sv] = {"codelist_code": cl_code, "terms": {}, "synonyms": {}}
-            elif cl_code and not out[sv].get("codelist_code"):
-                out[sv]["codelist_code"] = cl_code
-            out[sv].setdefault("synonyms", {})
+            keys = _ct_codelist_keys_from_obj(d)
+            if not keys:
+                continue
+            # Avoid treating term objects as codelists unless they have term containers/links.
+            has_term_container = any(k in d for k in ["terms", "concepts", "items"])
+            links = d.get("_links", {}) if isinstance(d.get("_links", {}), dict) else {}
+            has_term_link = "terms" in links or "self" in links
+            # Do not classify a plain term object as a codelist only because it
+            # contains a C-code.  Otherwise term NCI codes such as UNKNOWN/C17998
+            # can become the codelist-level Alias for UNIT/FRM/etc.
+            if not (has_term_container or has_term_link):
+                continue
 
-            # Terms may be embedded in the package response.
-            if isinstance(terms_obj, list):
-                for t in terms_obj:
-                    if not isinstance(t, dict):
-                        continue
-                    code = safe_text(_json_get_any(t, ["submissionValue", "codedValue", "value", "name"]))
-                    nci = safe_text(_json_get_any(t, ["conceptId", "nciCode", "termCode", "code"]))
-                    if code:
-                        if nci:
-                            out[sv]["terms"][code] = nci
-                        syn = extract_cdisc_synonyms_from_term(t)
-                        if syn:
-                            out[sv].setdefault("synonyms", {})[code] = syn
+            cl_code = _ct_codelist_nci_from_obj(d)
+            info = _ct_add_or_update_codelist(out, keys, cl_code)
+            if info is None:
+                continue
+            codelist_objects.append((d, keys[0]))
 
-        # Some endpoints return codelist links, not embedded terms. Try to fetch terms for codelists found.
-        for d in list(iter_dicts(payload)):
-            sv = safe_upper(_json_get_any(d, ["submissionValue", "submission_value", "name"]))
-            if not sv or sv not in out:
+            for terms_key in ["terms", "concepts", "items"]:
+                terms_obj = d.get(terms_key)
+                if isinstance(terms_obj, list):
+                    collect_terms_into(info, terms_obj)
+
+        # Second pass: follow codelist links to fetch the full codelist object and terms.
+        # Root cause fixed here: the package /codelists endpoint may provide only a link
+        # keyed by the NCI concept code (for example C66726) and not the codelist
+        # submission value (FRM).  If we only collect terms into the C-code key, a spec
+        # format named FRM will never find the CT map.  Therefore every fetched codelist
+        # payload is re-inspected and aliased back to all submission-value keys found in
+        # that payload before collecting terms.  This is generic for FRM, ROUTE, UNIT,
+        # FREQ, ACN, AESEV, etc.; no codelist-specific hardcoding is used.
+        for d, key in codelist_objects:
+            base_key = normalize_ct_lookup_key(key)
+            info = out.get(base_key, {})
+            if not isinstance(info, dict):
                 continue
             links = d.get("_links", {}) if isinstance(d, dict) else {}
-            term_href = ""
+            candidate_hrefs = []
             if isinstance(links, dict):
-                term_link = links.get("terms") or links.get("self")
-                if isinstance(term_link, dict):
-                    term_href = term_link.get("href", "")
-            if term_href and not out[sv]["terms"]:
-                if term_href.startswith("/"):
-                    term_href = base + term_href
+                # Fetch self first so codelist submissionValue aliases are learned before /terms.
+                for link_name in ["self", "terms"]:
+                    link = links.get(link_name)
+                    if isinstance(link, dict) and safe_text(link.get("href")):
+                        candidate_hrefs.append(safe_text(link.get("href")))
+                    elif isinstance(link, list):
+                        for li in link:
+                            if isinstance(li, dict) and safe_text(li.get("href")):
+                                candidate_hrefs.append(safe_text(li.get("href")))
+            # Also inspect direct href/url fields.
+            for hk in ["href", "url", "uri"]:
+                if safe_text(d.get(hk)):
+                    candidate_hrefs.append(safe_text(d.get(hk)))
+
+            expanded = []
+            for href in candidate_hrefs:
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    href = base + href
+                expanded.append(href)
+                if not href.rstrip("/").endswith("/terms"):
+                    expanded.append(href.rstrip("/") + "/terms")
+            # Preserve order and remove duplicates.
+            seen_hrefs = set()
+            expanded = [h for h in expanded if not (h in seen_hrefs or seen_hrefs.add(h))]
+
+            for href in expanded:
                 try:
-                    term_payload = request_json(term_href)
-                    for td in iter_dicts(term_payload):
-                        code = safe_text(_json_get_any(td, ["submissionValue", "codedValue", "value", "name"]))
-                        nci = safe_text(_json_get_any(td, ["conceptId", "nciCode", "termCode", "code"]))
-                        if code:
-                            if nci:
-                                out[sv]["terms"][code] = nci
-                            syn = extract_cdisc_synonyms_from_term(td)
-                            if syn:
-                                out[sv].setdefault("synonyms", {})[code] = syn
+                    term_payload = request_json(href)
+
+                    # If this is a full codelist payload, extract its true submission value
+                    # and create aliases such as FRM -> same dict as C66726.
+                    fetched_keys = []
+                    fetched_cl_code = ""
+                    if isinstance(term_payload, dict):
+                        fetched_keys = _ct_codelist_keys_from_obj(term_payload)
+                        fetched_cl_code = _ct_codelist_nci_from_obj(term_payload)
+                    if fetched_keys:
+                        alias_keys = [base_key] + fetched_keys
+                        info = _ct_add_or_update_codelist(out, alias_keys, fetched_cl_code) or info
+
+                    before = len(info.get("terms", {}) or {})
+                    collect_terms_into(info, term_payload)
+                    after = len(info.get("terms", {}) or {})
+                    # Do not break after self if /terms may contain more detail; continue unless
+                    # the current URL already was the terms endpoint and terms were loaded.
+                    if after > before and href.rstrip("/").endswith("/terms"):
+                        break
                 except Exception:
                     pass
 
+        # Third pass: infer acronym aliases from full codelist objects when available.
+        # Some CDISC responses expose codelist names/titles but not a simple submissionValue.
+        # If an object has a codelist NCI code and a compact trailing token in strings such as
+        # CL.C66726.FRM, add that token as an alias to the same CT entry.
+        for d, key in codelist_objects:
+            base_key = normalize_ct_lookup_key(key)
+            info = out.get(base_key)
+            if not isinstance(info, dict):
+                continue
+            alias_keys = [base_key]
+            for txt in _iter_json_strings(d):
+                for m in re.finditer(r"\bCL[._-]C\d{3,}[._-]([A-Za-z][A-Za-z0-9_-]{1,20})\b", txt, flags=re.I):
+                    alias_keys.append(m.group(1))
+            _ct_add_or_update_codelist(out, alias_keys, safe_text(info.get("codelist_code")))
+
+        # Remove accidental very long/non-key entries but retain aliases sharing dicts.
+        cleaned = {}
+        for k, v in out.items():
+            kk = normalize_ct_lookup_key(k)
+            if kk and len(kk) <= 30 and isinstance(v, dict):
+                cleaned[kk] = v
+        out = cleaned
+
         if status_callback:
-            status_callback(f"CDISC CT lookup loaded: {len(out)} codelists")
+            codelists_with_codes = sum(1 for v in out.values() if safe_text(v.get("codelist_code")))
+            terms_loaded = sum(len(v.get("terms", {}) or {}) for v in out.values())
+            status_callback(
+                f"CDISC CT lookup loaded: {len(out)} codelist keys; "
+                f"{codelists_with_codes} with NCI codes; {terms_loaded} term codes"
+            )
         return out
     except Exception as e:
         if status_callback:
             status_callback(f"CDISC Library CT lookup skipped/failed: {e}")
         return {}
-
 
 
 def merge_ct_maps(primary, fallback):
@@ -2158,24 +3326,30 @@ def default_format_for_variable(variable, current_format=""):
 
 
 def expected_sdtm_codelist_for_variable(variable):
-    """Return expected SDTM standard codelist name for CORE DD0124 checks.
+    """Return the expected SDTM standard codelist for a variable.
 
-    This is intentionally limited to variables currently flagged by CORE as
-    expected codelists. The returned value is the codelist suffix used in the
-    Define CodeList OID, e.g. FREQ -> CL.FREQ.
+    Kept only for validation/reference checks. It must NOT be used to populate
+    Format or write CodeListRef when the spec/GUI Format cell is blank.
     """
     var = safe_upper(variable)
+    if not var:
+        return ""
+
+    # Generic SDTM naming conventions across EC/EX/CM/APCM/etc.
+    if var.endswith("DOSFRM"):
+        return "FRM"
+    if var.endswith("DOSFRQ") or var.endswith("DOSFRQ"):
+        return "FREQ"
+    if var.endswith("DOSU") or var.endswith("DOSEU"):
+        return "UNIT"
+    if var.endswith("ROUTE"):
+        return "ROUTE"
+    if var.endswith("PRESP") or var.endswith("OCCUR"):
+        return "NY"
+
     mapping = {
         "DATEST": "DATEST",
         "DATESTCD": "DATESTCD",
-        "ECDOSFRM": "FRM",
-        "EXDOSFRM": "FRM",
-        "ECDOSFRQ": "FREQ",
-        "EXDOSFRQ": "FREQ",
-        "ECDOSU": "UNIT",
-        "EXDOSU": "UNIT",
-        "ECROUTE": "ROUTE",
-        "EXROUTE": "ROUTE",
         "EPOCH": "EPOCH",
         "LBSPCCND": "SPECCOND",
         "PRDECOD": "PROCEDUR",
@@ -2540,8 +3714,8 @@ def enforce_datest_pair_codelists(formats_df, datasets, ct_map=None):
                     "Format": "DATESTCD",
                     "Code": cd,
                     "Decode": name,
-                    "Codelist Code": safe_text(info_cd.get("codelist_code", "")) or known_codelist_nci_code("DATESTCD"),
-                    "Term Code": get_ct_term_code_generic(info_cd, cd) or known_term_nci_code("DATESTCD", cd),
+                    "Codelist Code": safe_text(info_cd.get("codelist_code", "")),
+                    "Term Code": get_ct_term_code_generic(info_cd, cd),
                     "Source Dataset": safe_upper(ds),
                     "Source Variable": "DATESTCD",
                     "Decode Variable": "DATEST",
@@ -2553,8 +3727,8 @@ def enforce_datest_pair_codelists(formats_df, datasets, ct_map=None):
                         "Format": "DATEST",
                         "Code": name,
                         "Decode": name,
-                        "Codelist Code": safe_text(info_nm.get("codelist_code", "")) or known_codelist_nci_code("DATEST"),
-                        "Term Code": get_ct_term_code_generic(info_nm, name) or known_term_nci_code("DATEST", name),
+                        "Codelist Code": safe_text(info_nm.get("codelist_code", "")),
+                        "Term Code": get_ct_term_code_generic(info_nm, name),
                         "Source Dataset": safe_upper(ds),
                         "Source Variable": "DATEST",
                         "Decode Variable": "",
@@ -2592,182 +3766,16 @@ def is_qnam_qlabel_pair(format_name, source_variable="", decode_variable=""):
 def is_custom_extended_term(row):
     """Return True when term is sponsor/custom and should carry def:ExtendedValue='Yes'.
 
-    P21 DD0029 is raised when CodeListItem/EnumeratedItem has no NCI alias/term code
-    and no def:ExtendedValue.  If Term Code is missing, treat it as an extended value.
+    Only CDISC CT lookup/import is allowed to populate term NCI codes.
+    Blank or '*' means the term is not CT-confirmed and must be treated as an extended value.
     """
-    return safe_text(row.get("Term Code")) == ""
+    return safe_text(row.get("Term Code")) in {"", "*"}
 
 
-KNOWN_CODELIST_NCI_CODES = {
-    # Frequently used SDTM/ADaM codelists. Used as a safety fallback when CDISC Library
-    # lookup is unavailable or the spec format is domain-qualified, e.g. DM.ARMNRS.
-    "YNULL": "C66742",
-    "NY": "C66742",
-    "NY_Y": "C66742",
-    "ACN": "C66767",
-    "AESEV": "C66769",
-    "AGEU": "C66781",
-    "DATESTCD": "C78732",
-    "DATEST": "C78731",
-    "FREQ": "C71113",
-    "FRM": "C66726",
-    "PROCEDUR": "C101858",
-    "RELSUB": "C100130",
-    "ROUTE": "C66729",
-    "SPECCOND": "C78733",
-    "UNIT": "C71620",
-    "DSCAT": "C66727",
-    "EPOCH": "C99079",
-    "ETHNIC": "C66790",
-    "IECAT": "C66797",
-    "LBTEST": "C67154",
-    "LBTESTCD": "C65047",
-    "ND": "C66742",
-    "NRIND": "C66783",
-    "OUT": "C66768",
-    "RACE": "C74457",
-    "SEX": "C66731",
-    "STENRF": "C66728",
-    "TSPARM": "C66738",
-    "TSPARMCD": "C66737",
-    "VSRESU": "C66770",
-    "VSTEST": "C67153",
-    "VSTESTCD": "C66741",
-    "ARMNRS": "C142179",
-    # ADaM CT fallbacks. These also resolve dataset-qualified formats such as
-    # ADEFF.DTYPE and ADLB.DTYPE through normalize_ct_lookup_key().
-    "DTYPE": "C81224",
-    "SBJTSTAT": "C124296",
-}
+KNOWN_CODELIST_NCI_CODES = {}
 
 
-KNOWN_TERM_NCI_CODES = {
-    # C66742 / NY / YNULL - No Yes Response
-    "YNULL": {
-        "Y": "C49488",
-        "YES": "C49488",
-        "N": "C49487",
-        "NO": "C49487",
-        "NA": "C48660",
-        "NOT APPLICABLE": "C48660",
-        "U": "C17998",
-        "UNK": "C17998",
-        "UNKNOWN": "C17998",
-    },
-    "NY": {
-        "Y": "C49488",
-        "YES": "C49488",
-        "N": "C49487",
-        "NO": "C49487",
-        "NA": "C48660",
-        "NOT APPLICABLE": "C48660",
-        "U": "C17998",
-        "UNK": "C17998",
-        "UNKNOWN": "C17998",
-    },
-    # C142179 / ARMNULRS / ARMNRS - Arm Null Reason
-    "ARMNRS": {
-        "ASSIGNED, NOT TREATED": "C142238",
-        "NOT ASSIGNED": "C142239",
-        "SCREEN FAILURE": "C49628",
-        "UNPLANNED TREATMENT": "C142240",
-        "RANDOMIZED BY MISTAKE": "C139237",
-        "REQUIRES PROHIBITED MEDICATION": "C191339",
-        "RECOVERY": "C25746",
-    },
-    "ARMNULRS": {
-        "ASSIGNED, NOT TREATED": "C142238",
-        "NOT ASSIGNED": "C142239",
-        "SCREEN FAILURE": "C49628",
-        "UNPLANNED TREATMENT": "C142240",
-        "RANDOMIZED BY MISTAKE": "C139237",
-        "REQUIRES PROHIBITED MEDICATION": "C191339",
-        "RECOVERY": "C25746",
-    },
-    # SDTM Drug Accountability Test Code / Name - DATESTCD / DATEST
-    # DATESTCD and DATEST are paired codelists. DATESTCD uses DATEST as the decode/name variable;
-    # DATEST itself remains the decode/label codelist and is not replaced by DATESTCD.
-    "DATESTCD": {
-        "DISPAMT": "C78721",
-        "RETAMT": "C78722",
-        "LOSTAMT": "C189430",
-        "EXPREAMT": "C202343",
-        "PREPAMT": "C170562",
-        "REMAMT": "C170563",
-    },
-    "DATEST": {
-        "Dispensed Amount": "C78721",
-        "Returned Amount": "C78722",
-        "Lost Amount": "C189430",
-        "Expected Remaining Amount": "C202343",
-        "Prepared Amount": "C170562",
-        "Remaining Amount": "C170563",
-    },
-    # SDTM Dosage Form - FRM
-    "FRM": {
-        "CAPSULE": "C25158",
-    },
-    # SDTM Specimen Condition - SPECCOND
-    "SPECCOND": {
-        "CLOTTED": "C78724",
-        "HEMOLIZED": "C70720",
-        "HEMOLYZED": "C70720",
-        "LIPEMIC": "C70715",
-        "FROZEN": "C70717",
-        "ROOM TEMPERATURE": "C70719",
-        "CALCIFIED": "C78723",
-        "AUTOLIZED": "C78725",
-        "ICTERIC": "C98744",
-    },
-    # SDTM Relationship to Subject - RELSUB
-    "RELSUB": {
-        "MOTHER": "C25189",
-        "MOTHER, BIOLOGICAL": "C96580",
-        "FATHER": "C25174",
-        "PARENT": "C42709",
-        "CHILD": "C150886",
-    },
-
-    # ADaM Derivation Type (DTYPE), codelist C81224. Keep submission-value
-    # matching case-sensitive to avoid hiding casing problems.
-    "DTYPE": {
-        "AVERAGE": "C81209",
-        "BC": "C92225",
-        "BLOCF": "C81201",
-        "BOC": "C132340",
-        "BOCF": "C92226",
-        "COPY": "C184383",
-        "EXTRAP": "C139176",
-        "HALFLLOQ": "C170546",
-        "INTERP": "C81208",
-        "LLOD": "C105701",
-        "LLOQ": "C170543",
-        "LOCF": "C81198",
-        "LOV": "C132341",
-        "LVPD": "C132342",
-        "MAXIMUM": "C82868",
-        "MINIMUM": "C82867",
-        "ML": "C53331",
-        "MOTH": "C81204",
-        "MOV": "C81207",
-        "NOCB": "C204584",
-        "PHANTOM": "C170545",
-        "POCF": "C81205",
-        "SOCF": "C81200",
-        "ULOD": "C174264",
-        "ULOQ": "C170544",
-        "WC": "C81203",
-        "WOC": "C132343",
-        "WOCF": "C81199",
-        "WOV": "C81206",
-    },
-    # ADaM Subject Trial Status (SBJTSTAT), codelist C124296.
-    "SBJTSTAT": {
-        "COMPLETED": "C25250",
-        "DISCONTINUED": "C25484",
-        "ONGOING": "C53279",
-    },
-}
+KNOWN_TERM_NCI_CODES = {}
 
 
 def normalize_ct_lookup_key(value):
@@ -2785,60 +3793,71 @@ def normalize_ct_lookup_key(value):
 
 
 def known_codelist_nci_code(format_name):
-    """Return fallback codelist-level NCI code for known CT codelists."""
-    return KNOWN_CODELIST_NCI_CODES.get(normalize_ct_lookup_key(format_name), "")
+    """Deprecated safety stub.
+
+    NCI codelist codes must come only from loaded CDISC CT.  Do not hardcode/fallback.
+    """
+    return ""
 
 
 def codelist_alias_code(fdf, format_name=""):
-    """Return first nonblank codelist NCI code from a formats dataframe.
+    """Return first CT-confirmed codelist NCI code from a formats dataframe.
 
-    Falls back to known standard CT codelist codes when the workbook/CDISC API did
-    not populate Codelist Code. This prevents P21 DD0031 for standard codelists
-    such as YNULL and domain-qualified ARMNRS values like DM.ARMNRS.
+    '*' is a review marker only and must never be written as an NCI Alias.
     """
     if fdf is not None and not getattr(fdf, "empty", True) and "Codelist Code" in fdf.columns:
         for v in fdf["Codelist Code"].tolist():
             txt = safe_text(v)
-            if txt:
+            if txt and txt != "*":
                 return txt
-    return known_codelist_nci_code(format_name)
+    return ""
 
 
 def add_nci_alias(parent, nci_code, q_func):
-    """Add Define-XML NCI Alias when code is available."""
+    """Add Define-XML NCI Alias only for real CT/NCI codes.
+
+    '*' is used in the review grid to make missing CT matches visible; it is not XML metadata.
+    """
     nci_code = safe_text(nci_code)
-    if nci_code:
+    if is_real_nci_code(nci_code):
         ET.SubElement(parent, q_func("Alias"), {
             "Context": "nci:ExtCodeID",
             "Name": nci_code
         })
 
 
-def known_term_nci_code(format_name, code_value):
-    """Return fallback term-level NCI code for known CT terms.
 
-    Term submission values are intentionally matched case-sensitively.
-    Example: UNIT value ``tsp`` and ``Tsp`` must not be treated as the same term,
-    because Pinnacle/CDISC term checks are case-sensitive for submission values.
-    Codelist names are still normalized, so DM.ARMNRS can resolve to ARMNRS.
+def is_real_nci_code(value):
+    """Return True only for real NCI codes that should be written as Alias.
+
+    The review grid uses '*' to flag missing CT mappings. That marker must
+    never be written to define.xml as an Alias because the Define stylesheet
+    renders it as [*] beside the submitted value.
     """
-    fmt_key = normalize_ct_lookup_key(format_name)
-    code_key = safe_text(code_value)
-    if not fmt_key or not code_key:
-        return ""
+    txt = safe_text(value)
+    return bool(re.fullmatch(r"C\d+", txt))
 
-    candidates = [fmt_key]
-    if fmt_key == "YNULL":
-        candidates.append("NY")
-    if fmt_key == "ARMNRS":
-        candidates.append("ARMNULRS")
 
-    for key in candidates:
-        terms = KNOWN_TERM_NCI_CODES.get(key, {})
-        # Exact/case-sensitive match only. Do not use upper/lower fallback here.
-        if code_key in terms and safe_text(terms.get(code_key)):
-            return safe_text(terms.get(code_key))
+def known_term_nci_code(format_name, code_value):
+    """Deprecated safety stub.
+
+    Term NCI codes must come only from loaded CDISC CT.  Do not hardcode/fallback.
+    """
     return ""
+
+
+def mark_missing_ct_codes_for_review(df):
+    """Show '*' in review output where CT lookup/import did not supply NCI codes.
+
+    The marker makes extensible/custom values visible to reviewers. XML writer skips '*'.
+    """
+    if df is None or getattr(df, "empty", True):
+        return df
+    out = df.copy()
+    for col in ["Codelist Code", "Term Code"]:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda v: safe_text(v) if safe_text(v) else "*")
+    return out
 
 
 def get_ct_info_generic(ct_map, format_name):
@@ -2875,6 +3894,12 @@ def get_ct_term_code_generic(ct_info, code_value):
 
     if raw_code in terms and safe_text(terms.get(raw_code)):
         return safe_text(terms.get(raw_code))
+
+    # Generic fallback for CT values that differ only by surrounding whitespace.
+    # Do not change case here; case mismatches should remain visible.
+    for k, v in terms.items():
+        if safe_text(k) == raw_code and safe_text(v):
+            return safe_text(v)
 
     return ""
 
@@ -3305,7 +4330,6 @@ class DefineXmlWriter:
         self.add_itemgroups(mdv)
         self.add_itemdefs(mdv)
         self.add_codelists(mdv)
-        self.add_expected_standard_codelists(mdv)
         self.add_methods_and_comments(mdv)
         self.add_leaves(mdv)
         self.add_valuelists(mdv)
@@ -3546,7 +4570,7 @@ class DefineXmlWriter:
         meta["Order"] = pd.to_numeric(meta.get("Order", ""), errors="coerce")
         dataset_order = sorted(
             [safe_upper(x) for x in meta.get("Dataset", pd.Series(dtype=str)).dropna().unique()],
-            key=lambda x: (dataset_class_sort_value(x, self.domain_lookup, self.standard), x)
+            key=lambda x: dataset_define_sort_key(x, self.domain_lookup, self.standard, meta)
         )
         for ds in dataset_order:
             ddf = meta[meta["Dataset"].apply(safe_upper) == ds].copy()
@@ -3558,7 +4582,9 @@ class DefineXmlWriter:
                 dinfo["Class"] = "RELATIONSHIP"
                 dinfo["Structure"] = "One record per IDVAR, IDVARVAL, and QNAM value per subject."
                 dinfo["Purpose"] = dinfo.get("Purpose") or "Tabulation"
-            desc = safe_text(dinfo.get("Description")) or ds
+            desc = safe_text(dinfo.get("Description"))
+            if not desc or safe_upper(desc) == ds:
+                desc = default_dataset_description(ds, self.standard)
             dclass = normalize_domain_class(dinfo.get("Class")) or default_dataset_class(ds, self.standard)
             structure = safe_text(dinfo.get("Structure")) or "One record per subject per event/assessment as applicable"
             purpose = safe_text(dinfo.get("Purpose")) or ("Tabulation" if self.standard == "SDTM" else "Analysis")
@@ -3680,19 +4706,20 @@ class DefineXmlWriter:
             code_list_oid = ""
             if fmt:
                 # Define-XML 2.0: do not write nonstandard FormatName on ItemDef.
-                # ISO/date formats use def:DisplayFormat; CT/dictionaries use CodeListRef.
-                if is_iso_8601_format(fmt):
-                    attrs[self.dq("DisplayFormat")] = "ISO 8601"
-                if is_define_codelist_format(fmt, var, dtype):
+                # ISO 8601 is handled below as def:DisplayFormat only, not as CodeListRef.
+                if (not is_iso_8601_format(fmt)) and is_define_codelist_format(fmt, var, dtype):
                     candidate_oid = codelist_oid_for_format(fmt, getattr(self, "ct_alias_map", {}))
                     code_list_oid = candidate_oid if candidate_oid in available_code_lists else ""
-            # CORE DD0124: some SDTM variables have expected standard codelists even
-            # when the spec Control/Format column is blank or domain-qualified.
-            # Link those variables to the standard CL.* OID and synthesize the
-            # CodeList later when it was not present in the generated Formats table.
-            expected_oid = expected_codelist_oid_for_variable(var, self.standard)
-            if expected_oid:
-                code_list_oid = expected_oid
+            # Do not auto-link expected SDTM codelists when the spec/GUI Format is blank.
+            # Format/CodeListRef must come only from the specification or user edits.
+
+            # ISO 8601 should appear in the display-format column as well as
+            # the stylesheet's controlled terms / ISO format column. Do not create
+            # a CodeListRef for ISO formats.
+            if is_iso_8601_format(fmt):
+                attrs[self.dq("DisplayFormat")] = "ISO 8601"
+                code_list_oid = ""
+
             origin = safe_upper(row.get("Origin"))
             comments = clean_comment_text(row.get("Comments"), origin)
             # Define-XML XSL displays Predecessor value directly from def:Origin.
@@ -3718,15 +4745,17 @@ class DefineXmlWriter:
 
     def define_datatype(self, dtype):
         t = safe_upper(dtype)
-        if t == "CHAR":
+        if t in {"CHAR", "CHARACTER", "TEXT", "STRING"}:
             return "text"
         if t == "DATE":
             return "date"
         if t == "DATETIME":
             return "datetime"
-        if t == "FLOAT":
+        if t in {"FLOAT", "DOUBLE", "DECIMAL"}:
             return "float"
-        return "integer" if t == "NUM" else "text"
+        if t in {"NUM", "NUMBER", "NUMERIC", "INTEGER", "INT"}:
+            return "integer"
+        return "text"
 
     def codelist_datatype_for_format(self, fmt, fallback=""):
         """Infer the Define CodeList datatype for a referenced format from its Code values.
@@ -3854,12 +4883,23 @@ class DefineXmlWriter:
         # Define-XML 2.1 replaces CRF/eDT style collection with Type=Collected + Source.
         if "CRF" in upper or upper == "COLLECTED":
             org = ET.SubElement(item, self.dq("Origin"), origin_attrs(origin_type_for("Collected", "CRF")))
-            pages = parse_crf_pages(origin)
-            if pages and self.standard == "SDTM":
+
+            # TMP-BS-016 stores CRF page numbers separately in column J / Pages.
+            # Use that first.  The older fallback still supports legacy specs where
+            # pages were embedded in Origin text such as "CRF page 40".
+            page_text = safe_text(row.get("Pages"))
+            if page_text:
+                page_refs = re.sub(r"[;,]+", " ", page_text).strip()
+                page_refs = re.sub(r"\s+", " ", page_refs)
+            else:
+                parsed_pages = parse_crf_pages(origin)
+                page_refs = " ".join(str(p) for p in parsed_pages)
+
+            if page_refs and self.standard == "SDTM":
                 dr = ET.SubElement(org, self.dq("DocumentRef"), {"leafID": "LF.blankcrf"})
                 ET.SubElement(dr, self.dq("PDFPageRef"), {
                     "Type": "PhysicalRef",
-                    "PageRefs": " ".join(str(p) for p in pages)
+                    "PageRefs": page_refs
                 })
             return
 
@@ -3944,15 +4984,21 @@ class DefineXmlWriter:
             code_list_oid = ""
             if fmt:
                 # Define-XML 2.0: no FormatName on VLM ItemDef either.
-                if is_iso_8601_format(fmt):
-                    attrs[self.dq("DisplayFormat")] = "ISO 8601"
-                if is_define_codelist_format(fmt, res, row.get("Type")):
+                # ISO 8601 is handled below as def:DisplayFormat only, not as CodeListRef.
+                if (not is_iso_8601_format(fmt)) and is_define_codelist_format(fmt, res, row.get("Type")):
                     candidate_oid = codelist_oid_for_format(fmt, getattr(self, "ct_alias_map", {}))
                     code_list_oid = candidate_oid if candidate_oid in available_code_lists else ""
                 else:
                     code_list_oid = ""
+
+            # ISO 8601 should appear in the VLM display-format column as well;
+            # never create a CodeListRef for ISO formats.
+            if is_iso_8601_format(fmt):
+                attrs[self.dq("DisplayFormat")] = "ISO 8601"
+                code_list_oid = ""
+
             item = ET.SubElement(mdv, self.q("ItemDef"), attrs)
-            self.add_translated(item, f"{res} where {safe_text(row.get('Where Clause'))}")
+            self.add_translated(item, f"{res} where {self.vlm_complete_where_clause(row)}")
             if code_list_oid:
                 ET.SubElement(item, self.q("CodeListRef"), {"CodeListOID": code_list_oid})
             # VLM origin/comment should behave like variable-level metadata.
@@ -3961,30 +5007,51 @@ class DefineXmlWriter:
             except Exception:
                 pass
 
-    def vlm_key(self, row):
-        # Legacy/SAS-style key: grouping variable/value pairs only.
-        # Example: DATESTCD.DISP or LBTESTCD.ALB.LBCAT.CHEMISTRY.LBSPEC.SERUM
-        parts = []
-        gv = safe_text(row.get("Grouping Variable")); val = safe_text(row.get("Group Value"))
-        if gv and val:
-            parts.extend([safe_upper(gv), safe_text(val)])
+    def vlm_group_pairs(self, row):
+        """Return all value-level where-clause grouping pairs.
+
+        The primary grouping pair plus Grouping Variable 1-4 must be used for
+        both WhereClauseDef RangeChecks and VLM OID generation.  Without this,
+        rows such as FATESTCD=OCCUR with different FACAT/FAMETHOD values all
+        get the same displayed ID/ItemOID.
+        """
+        pairs = []
+        seen = set()
+
+        def add_pair(gv, val):
+            gv = safe_upper(gv)
+            val = safe_text(val)
+            if not gv or not val:
+                return
+            k = (gv, safe_upper(val))
+            if k not in seen:
+                pairs.append((gv, val))
+                seen.add(k)
+
+        add_pair(row.get("Grouping Variable"), row.get("Group Value"))
         for i in range(1, 5):
-            gv = safe_text(row.get(f"Grouping Variable {i}")); val = safe_text(row.get(f"Group Value {i}"))
-            if gv and val:
-                parts.extend([safe_upper(gv), safe_text(val)])
+            add_pair(row.get(f"Grouping Variable {i}"), row.get(f"Group Value {i}"))
+        return pairs
+
+    def vlm_complete_where_clause(self, row):
+        """Return a full, display-safe where clause from all VLM grouping pairs."""
+        pairs = self.vlm_group_pairs(row)
+        if pairs:
+            return " AND ".join([f"{safe_upper(gv)}.EQ.{safe_text(val)}" for gv, val in pairs])
+        return safe_text(row.get("Where Clause"))
+
+    def vlm_key(self, row):
+        """Build a unique VLM key from every grouping condition.
+
+        The OID key must include Variable 2/3/4 conditions, not only the first
+        condition. Example:
+          FATESTCD.OCCUR.FACAT.LONG_TERM_FOLLOW_UP.FAMETHOD.PSA
+        """
+        parts = []
+        for gv, val in self.vlm_group_pairs(row):
+            parts.extend([safe_upper(gv), safe_text(val)])
         key = ".".join(parts)
         return key if key else xml_id(safe_text(row.get("Where Clause")) or safe_text(row.get("Result Variable")))
-
-    def vlm_group_pairs(self, row):
-        pairs = []
-        gv = safe_text(row.get("Grouping Variable")); val = safe_text(row.get("Group Value"))
-        if gv and val:
-            pairs.append((gv, val))
-        for i in range(1, 5):
-            gv = safe_text(row.get(f"Grouping Variable {i}")); val = safe_text(row.get(f"Group Value {i}"))
-            if gv and val:
-                pairs.append((gv, val))
-        return pairs
 
     def add_external_dictionary_codelists(self, mdv):
         """Add external dictionary CodeLists once.
@@ -4221,8 +5288,8 @@ class DefineXmlWriter:
                 else:
                     attrs[self.dq("IsNonStandard")] = "Yes"
             cl = ET.SubElement(mdv, self.q("CodeList"), attrs)
-            if c_code:
-                ET.SubElement(cl, self.q("Alias"), {"Context": "nci:ExtCodeID", "Name": c_code})
+            if is_real_nci_code(c_code):
+                add_nci_alias(cl, c_code, self.q)
 
             seen_codes = set()
             for coded, decode, term_code in items:
@@ -4231,7 +5298,7 @@ class DefineXmlWriter:
                     continue
                 seen_codes.add(coded)
                 item_attrs = {"CodedValue": coded}
-                if not safe_text(term_code):
+                if not is_real_nci_code(term_code):
                     item_attrs[self.dq("ExtendedValue")] = "Yes"
                 # Term NCI codes are represented using Alias below.
                 item = ET.SubElement(cl, self.q("CodeListItem"), item_attrs)
@@ -4240,8 +5307,8 @@ class DefineXmlWriter:
                     dec = ET.SubElement(item, self.q("Decode"))
                     tt = ET.SubElement(dec, self.q("TranslatedText"), {"{http://www.w3.org/XML/1998/namespace}lang": "en"})
                     tt.text = decode_text
-                if safe_text(term_code):
-                    ET.SubElement(item, self.q("Alias"), {"Context": "nci:ExtCodeID", "Name": safe_text(term_code)})
+                if is_real_nci_code(term_code):
+                    add_nci_alias(item, term_code, self.q)
 
     def add_codelists(self, mdv):
         # First add MedDRA/WHO Drug as external dictionaries once, based on metadata use.
@@ -4285,7 +5352,11 @@ class DefineXmlWriter:
             ct_key = ct_lookup_key_from_format(raw_fmt) or ct_lookup_key_from_format(fmt) or raw_fmt
             ct_info = get_ct_info_generic(ct_map, ct_key) or get_ct_info_generic(ct_map, raw_fmt)
 
-            codelist_nci = codelist_alias_code(fdf, raw_fmt) or safe_text(ct_info.get("codelist_code")) or known_codelist_nci_code(raw_fmt)
+            # Prefer the CDISC CT map for codelist-level NCI code.  The Formats
+            # review grid can contain stale/wrong values from an earlier lookup
+            # pass, e.g. UNIT carrying UNKNOWN term code C17998.  CT map is the
+            # source of truth; the grid value is only a fallback when CT is absent.
+            codelist_nci = safe_text(ct_info.get("codelist_code")) or codelist_alias_code(fdf, raw_fmt)
 
             prepared_rows = []
             for _, row_obj in fdf.iterrows():
@@ -4303,12 +5374,26 @@ class DefineXmlWriter:
                     row_obj.get("Source Variable", "")
                 )
 
-                term_nci = (
-                    safe_text(row_obj.get("Term Code"))
-                    or get_ct_term_code_generic(ct_info, code_value)
-                    or known_term_nci_code(fmt, code_value)
-                    or known_term_nci_code(raw_fmt, code_value)
-                )
+                # Determine whether this codelist item is an exact CDISC CT term for the
+                # selected terminology package.  A populated Term Code in the review grid is
+                # not enough by itself: if the CodedValue is not an exact CT submission value
+                # for this codelist/package, P21 expects def:ExtendedValue="Yes".
+                # Also treat the review marker "*" as missing; it must never suppress
+                # ExtendedValue or be written as an Alias.
+                row_term_nci = safe_text(row_obj.get("Term Code"))
+                if row_term_nci == "*":
+                    row_term_nci = ""
+                ct_term_nci = get_ct_term_code_generic(ct_info, code_value)
+                # Prefer exact CDISC CT term match over review-grid term code.
+                # This prevents stale/wrong term codes from suppressing
+                # def:ExtendedValue or being written as Alias.
+                term_nci = ct_term_nci or row_term_nci
+                # If a real NCI term code is available from either CDISC CT lookup
+                # or the reviewed Formats grid, do not mark it as ExtendedValue.
+                # The Define stylesheet renders def:ExtendedValue="Yes" as [*].
+                # Therefore a term like SCREENING [C202487] must not also show [*].
+                is_exact_ct_term = bool(is_real_nci_code(term_nci))
+                is_extended_value = not is_exact_ct_term
 
                 # Preserve source value exactly. Do not fix casing during Define generation.
                 # CT term/NCI matching is case-sensitive.
@@ -4316,6 +5401,7 @@ class DefineXmlWriter:
                     "code_value": code_value,
                     "decode_value": safe_text(dec_value),
                     "term_nci": safe_text(term_nci),
+                    "extended_value": is_extended_value,
                 })
 
 
@@ -4372,16 +5458,18 @@ class DefineXmlWriter:
                 code_value = item_data["code_value"]
                 decode_value = item_data["decode_value"]
                 term_nci = item_data["term_nci"]
+                is_extended_value = bool(item_data.get("extended_value"))
 
                 attrs = {
                     "CodedValue": code_value,
                     "OrderNumber": str(order_number)
                 }
-                # Define-XML 2.0 and 2.1 require def:ExtendedValue when a term has no
-                # standard/NCI Alias. This avoids DD0029 for sponsor/custom terms.
-                # Standard CT term issues will still show through DD0024/DD0032 when
-                # the value itself is not valid for the referenced standard codelist.
-                if not safe_text(term_nci):
+                # Define-XML 2.0 and 2.1 require def:ExtendedValue when the displayed
+                # CodedValue is not an exact CDISC CT submission value for the selected
+                # CT package. This includes values that have a possible/review NCI code
+                # but are not present as exact terms in the selected package, such as
+                # some UNIT values reported by P21 as DD0029.
+                if is_extended_value or not safe_text(term_nci) or safe_text(term_nci) == "*":
                     attrs[self.dq("ExtendedValue")] = "Yes"
 
                 if all_decode_blank:
@@ -4581,11 +5669,9 @@ class DefineXmlWriter:
                     if safe_text(val):
                         elem.attrib[attr_name] = define_oid(*safe_text(val).split('.'))
 
-        # Final CodeList NCI/ExtendedValue post-fix for both Define-XML 2.0 and 2.1.
-        # Some CDISC Library/API runs can leave CodeList-level aliases blank even when
-        # the codelist is a known CDISC CT list, especially for dataset-qualified
-        # formats or codelists generated from review rows. Add a conservative fallback
-        # here immediately before writing XML.
+        # Final CodeList ExtendedValue post-fix for both Define-XML 2.0 and 2.1.
+        # NCI aliases are written only when CT lookup/import supplied real codes.
+        # No manual fallback NCI code is added here.
         ext_attr = self.dq("ExtendedValue")
         for cl in root.iter():
             if local_name(cl) != "CodeList":
@@ -4597,10 +5683,14 @@ class DefineXmlWriter:
             if not cl_key and cl_oid.upper().startswith("CL."):
                 cl_key = normalize_ct_lookup_key(cl_oid[3:])
 
-            # Add missing codelist-level NCI Alias from known fallback map.
-            cl_code = known_codelist_nci_code(cl_key)
+            # Remove placeholder/non-NCI aliases that may have been created from review markers.
+            for c in list(cl):
+                if local_name(c) == "Alias" and not is_real_nci_code(c.attrib.get("Name")):
+                    cl.remove(c)
+            # Do not add any manual codelist-level NCI Alias.
+            cl_code = ""
             has_cl_alias = any(
-                local_name(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                local_name(c) == "Alias" and is_real_nci_code(c.attrib.get("Name"))
                 for c in list(cl)
             )
             if cl_code and not has_cl_alias:
@@ -4612,8 +5702,11 @@ class DefineXmlWriter:
             for item in list(cl):
                 if local_name(item) not in {"CodeListItem", "EnumeratedItem"}:
                     continue
+                for c in list(item):
+                    if local_name(c) == "Alias" and not is_real_nci_code(c.attrib.get("Name")):
+                        item.remove(c)
                 has_item_alias = any(
-                    local_name(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                    local_name(c) == "Alias" and is_real_nci_code(c.attrib.get("Name"))
                     for c in list(item)
                 )
                 if not has_item_alias:
@@ -4666,11 +5759,15 @@ class DefineXmlWriter:
             if not cl_key:
                 cl_key = normalize_ct_lookup_key(cl_oid.replace("CL.", ""))
 
+            # Remove placeholder/non-NCI aliases that may have been created from review markers.
+            for c in list(cl):
+                if lname(c) == "Alias" and not is_real_nci_code(c.attrib.get("Name")):
+                    cl.remove(c)
             # CodeList-level NCI alias: fixes DD0031 for standard codelists when
             # CDISC Library/API lookup did not populate Codelist Code.
-            cl_code = known_codelist_nci_code(cl_key)
+            cl_code = ""
             has_cl_alias = any(
-                lname(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                lname(c) == "Alias" and is_real_nci_code(c.attrib.get("Name"))
                 for c in list(cl)
             )
             if cl_code and not has_cl_alias:
@@ -4684,14 +5781,21 @@ class DefineXmlWriter:
                     continue
 
                 coded_value = safe_text(item.attrib.get("CodedValue"))
+                for c in list(item):
+                    if lname(c) == "Alias" and not is_real_nci_code(c.attrib.get("Name")):
+                        item.remove(c)
                 has_item_alias = any(
-                    lname(c) == "Alias" and safe_text(c.attrib.get("Name"))
+                    lname(c) == "Alias" and is_real_nci_code(c.attrib.get("Name"))
                     for c in list(item)
                 )
+                # If a real NCI alias is present, the term should not be displayed
+                # as an extended value. The stylesheet shows ExtendedValue as [*],
+                # which caused values such as SCREENING [C202487] [*].
                 if has_item_alias:
+                    item.attrib.pop(ext_attr, None)
                     continue
 
-                term_code = known_term_nci_code(cl_key, coded_value)
+                term_code = ""
                 if term_code:
                     add_nci_alias(item, term_code, self.q)
                     item.attrib.pop(ext_attr, None)
@@ -4761,6 +5865,11 @@ class DefineStudio(QtWidgets.QWidget):
             self.load_json_config()
         except Exception:
             pass
+        # If define_inputs.json has auto_import_inputs=true, restore the saved GUI inputs.
+        try:
+            self.auto_import_define_inputs_if_enabled()
+        except Exception as e:
+            self.set_status(f"Auto import of define_inputs.json skipped: {e}", "error")
         self.apply_style()
 
     def build_ui(self):
@@ -4801,16 +5910,15 @@ class DefineStudio(QtWidgets.QWidget):
         self.controls_frame = controls
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(10, 8, 10, 8)
-        controls_layout.setSpacing(6)
+        controls_layout.setSpacing(8)
 
-        # Top workflow navigation. Each button shows only the inputs/actions needed for that step.
+        # Top workflow navigation. Inputs are maintained in the Inputs tab below,
+        # so only action sections are shown here.
         self.workflow_nav = QtWidgets.QHBoxLayout()
-        self.btn_nav_inputs = QtWidgets.QPushButton("1. Enter Inputs")
-        self.btn_nav_load = QtWidgets.QPushButton("2. Load Data / Metadata")
-        self.btn_nav_define = QtWidgets.QPushButton("3. Generate Define")
-        self.nav_buttons = [self.btn_nav_inputs, self.btn_nav_load, self.btn_nav_define]
+        self.btn_nav_load = QtWidgets.QPushButton("Metadata Tools")
+        self.btn_nav_define = QtWidgets.QPushButton("Define Output")
+        self.nav_buttons = [self.btn_nav_load, self.btn_nav_define]
         nav_colors = [
-            ("#2563eb", "#1d4ed8"),
             ("#7c3aed", "#5b21b6"),
             ("#0f766e", "#115e59"),
         ]
@@ -4829,8 +5937,9 @@ class DefineStudio(QtWidgets.QWidget):
         controls_layout.addLayout(self.workflow_nav)
 
         self.workflow_stack = QtWidgets.QStackedWidget()
-        self.workflow_stack.setMinimumHeight(82)
-        self.workflow_stack.setMaximumHeight(100)
+        # Keep the action-button area compact but with enough padding so rounded corners are not clipped.
+        self.workflow_stack.setMinimumHeight(118)
+        self.workflow_stack.setMaximumHeight(132)
         controls_layout.addWidget(self.workflow_stack)
 
         self.config_edit = QtWidgets.QLineEdit(DEFAULT_CONFIG_PATH)
@@ -4840,6 +5949,10 @@ class DefineStudio(QtWidgets.QWidget):
         self.sp_file_edit = QtWidgets.QLineEdit(DEFAULT_SPEC_FILE_PATH)
         self.dataset_edit = QtWidgets.QLineEdit()
         self.btn_data = QtWidgets.QPushButton("Browse XPT Folder")
+        self.btn_load_inputs = QtWidgets.QPushButton("Load Inputs")
+        self.btn_export_inputs = QtWidgets.QPushButton("Export Inputs")
+        self.auto_import_inputs_chk = QtWidgets.QCheckBox("Auto import define_inputs.json")
+        self.auto_import_inputs_chk.setToolTip("When checked, Define XML Studio loads define_inputs.json automatically on startup.")
         self.btn_load_spec = QtWidgets.QPushButton("Load Spec / XPT")
         self.btn_refresh_formats = QtWidgets.QPushButton("Generate CT")
         self.btn_generate_vlm = QtWidgets.QPushButton("Generate VLM")
@@ -4886,6 +5999,7 @@ class DefineStudio(QtWidgets.QWidget):
             self.meddra_edit, self.whodrug_edit, self.study_id_edit,
             self.study_desc_edit, self.acrf_file_edit, self.csdrg_file_edit,
             self.adrg_file_edit, self.include_acrf, self.include_csdrg, self.include_adrg, self.btn_data,
+            self.btn_load_inputs, self.btn_export_inputs, self.auto_import_inputs_chk,
             self.load_spec_vlm_chk,
         ]
 
@@ -4904,48 +6018,34 @@ class DefineStudio(QtWidgets.QWidget):
             grid.addWidget(lab, row, col)
             return lab
 
-        # Page 1: compact top panel. Full input entry is in the Inputs tab below.
-        self.page_inputs = QtWidgets.QWidget()
-        inputs_top_lay = QtWidgets.QVBoxLayout(self.page_inputs)
-        inputs_top_lay.setContentsMargins(8, 6, 8, 6)
-        inputs_top_lay.setSpacing(4)
-        self.input_note = QtWidgets.QLabel(
-            "Enter/edit all study, SharePoint, XPT, version, dictionary, and document inputs in the Inputs tab below. "
-            "cdisc_api_key.json is used only for CDISC Library API key(s)."
-        )
-        self.input_note.setWordWrap(True)
-        self.input_note.setStyleSheet("color: #315f8f; font-style: italic;")
-        inputs_top_lay.addWidget(self.input_note)
-        inputs_top_lay.addStretch(1)
-        self.workflow_stack.addWidget(self.page_inputs)
-
         def build_action_page(title, detail, widgets):
             page = QtWidgets.QWidget()
-            page.setMinimumHeight(78)
-            page.setMaximumHeight(96)
+            # Compact action page. The internal margins keep rounded button corners clear of the frame edge.
+            page.setMinimumHeight(112)
+            page.setMaximumHeight(126)
             lay = QtWidgets.QVBoxLayout(page)
-            lay.setContentsMargins(8, 4, 8, 4)
-            lay.setSpacing(4)
+            lay.setContentsMargins(18, 10, 18, 10)
+            lay.setSpacing(8)
             lbl = QtWidgets.QLabel(f"<b>{title}</b> - {detail}")
             lbl.setWordWrap(False)
-            lbl.setMaximumHeight(20)
+            lbl.setMaximumHeight(22)
             lbl.setStyleSheet("color: #184a78; font-size: 9pt;")
             lay.addWidget(lbl)
             for w in widgets:
                 if isinstance(w, QtWidgets.QLayout):
                     lay.addLayout(w)
                 else:
-                    w.setMaximumHeight(24)
+                    w.setMaximumHeight(54)
                     lay.addWidget(w)
             return page
 
         def style_action_button(btn, base="#2f80ed", hover="#1f64c8"):
-            btn.setMinimumHeight(32)
-            btn.setMaximumHeight(34)
+            btn.setMinimumHeight(42)
+            btn.setMaximumHeight(46)
             btn.setFocusPolicy(QtCore.Qt.NoFocus)
             btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             btn.setStyleSheet(
-                f"QPushButton {{ background-color: {base}; color: white; border: 0px; border-radius: 8px; padding: 4px 10px; font-family: 'Times New Roman'; font-size: 10pt; font-weight: bold; }}"
+                f"QPushButton {{ background-color: {base}; color: white; border: 0px; border-radius: 9px; padding: 5px 12px; font-family: 'Times New Roman'; font-size: 14pt; font-weight: bold; }}"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 "QPushButton:disabled { background-color: #d9d9d9; color: #7a7a7a; border: 0px; }"
             )
@@ -4957,34 +6057,42 @@ class DefineStudio(QtWidgets.QWidget):
             (self.btn_validate, ("#e11d48", "#be123c")),
             (self.btn_define, ("#0f766e", "#115e59")),
             (self.btn_export, ("#2563eb", "#1d4ed8")),
+            (self.btn_load_inputs, ("#0ea5e9", "#0284c7")),
+            (self.btn_export_inputs, ("#2563eb", "#1d4ed8")),
         ]:
             style_action_button(b, colors[0], colors[1])
 
         load_buttons = QtWidgets.QHBoxLayout()
+        load_buttons.setContentsMargins(0, 6, 0, 6)
+        load_buttons.setSpacing(10)
         load_buttons.addWidget(self.btn_load_spec)
         load_buttons.addWidget(self.btn_refresh_formats)
         load_buttons.addWidget(self.btn_generate_vlm)
         load_buttons.addWidget(self.btn_validate)
 
         self.page_load = build_action_page(
-            "Load Data / Metadata",
-            "Load spec/XPT, generate CT, generate VLM, then validate.",
-            [load_buttons, self.load_spec_vlm_chk],
+            "Metadata action buttons",
+            "Use the buttons below to load spec/XPT, generate CT, generate VLM, and validate.",
+            [load_buttons],
         )
         self.workflow_stack.addWidget(self.page_load)
 
         define_buttons = QtWidgets.QHBoxLayout()
+        define_buttons.setContentsMargins(0, 6, 0, 6)
+        define_buttons.setSpacing(10)
         define_buttons.addWidget(self.btn_define)
         define_buttons.addWidget(self.btn_export)
         self.page_define = build_action_page(
-            "Generate Define.xml",
-            "Write define.xml to selected XPT folder or export review XLSX.",
+            "Define output action buttons",
+            "Use the buttons below to write define.xml to the selected XPT folder or export review XLSX.",
             [define_buttons],
         )
         self.workflow_stack.addWidget(self.page_define)
 
-        controls.setMaximumHeight(165)
-        root.addWidget(controls)
+        # Top workflow/action panel removed from the visible UI.
+        # Action buttons are now placed inside their relevant tabs to avoid duplicated navigation
+        # and prevent button/status-panel overlap on smaller screens.
+        controls.setVisible(False)
 
         # Status panel is intentionally placed near the top so workflow progress is visible
         # even when the user is working inside any tab. New messages are appended at the bottom.
@@ -5010,10 +6118,20 @@ class DefineStudio(QtWidgets.QWidget):
         inputs_tab_layout.setContentsMargins(12, 10, 12, 10)
         inputs_tab_layout.setSpacing(8)
         input_header = QtWidgets.QLabel(
-            "Enter all required inputs here, then click the top workflow button: 2. Load Data / Metadata."
+            "Enter all required inputs here, or load them from define_inputs.json, then click Load Spec / XPT."
         )
         input_header.setStyleSheet("font-weight: bold; color: #184a78;")
         inputs_tab_layout.addWidget(input_header)
+        input_action_row = QtWidgets.QHBoxLayout()
+        input_action_row.setContentsMargins(0, 0, 0, 4)
+        input_action_row.setSpacing(10)
+        input_action_row.addWidget(self.btn_load_inputs)
+        input_action_row.addWidget(self.btn_export_inputs)
+        input_action_row.addWidget(self.auto_import_inputs_chk)
+        input_action_row.addSpacing(12)
+        input_action_row.addWidget(self.btn_load_spec)
+        input_action_row.addStretch(1)
+        inputs_tab_layout.addLayout(input_action_row)
         inputs_panel = QtWidgets.QFrame()
         inputs_panel.setObjectName("Controls")
         input_grid = QtWidgets.QGridLayout(inputs_panel)
@@ -5120,6 +6238,11 @@ class DefineStudio(QtWidgets.QWidget):
         self.tab_formats = QtWidgets.QWidget(); fmt_layout = QtWidgets.QVBoxLayout(self.tab_formats)
         self.formats_view = QtWidgets.QTableView(); self.formats_model = PandasTableModel(self.formats_df, set(FORMAT_COLUMNS)); self.formats_view.setModel(self.formats_model)
         self.formats_proxy = QtCore.QSortFilterProxyModel(self); self.formats_proxy.setSourceModel(self.formats_model); self.formats_proxy.setFilterKeyColumn(-1); self.formats_proxy.setFilterCaseSensitivity(QtCore.Qt.CaseInsensitive); self.formats_view.setModel(self.formats_proxy)
+        fmt_action_row = QtWidgets.QHBoxLayout()
+        fmt_action_row.setContentsMargins(0, 0, 0, 4)
+        fmt_action_row.addWidget(self.btn_refresh_formats)
+        fmt_action_row.addStretch(1)
+        fmt_layout.addLayout(fmt_action_row)
         fmt_layout.addWidget(QtWidgets.QLabel("Formats/CT generated only from KEEP=1 metadata rows where Format is non-missing. Blank Decode is automatically set to Code during refresh. All columns are editable for review."))
         self.formats_filter = QtWidgets.QLineEdit(); self.formats_filter.setPlaceholderText("Filter formats / CT..."); self.formats_filter.textChanged.connect(lambda t: self.apply_tab_filter(self.formats_proxy, t)); fmt_layout.addWidget(self.formats_filter)
         fmt_layout.addWidget(self.formats_view); self.tabs.addTab(self.tab_formats, "Formats / CT")
@@ -5127,11 +6250,23 @@ class DefineStudio(QtWidgets.QWidget):
         self.tab_vlm = QtWidgets.QWidget(); vlm_layout = QtWidgets.QVBoxLayout(self.tab_vlm)
         self.vlm_view = QtWidgets.QTableView(); self.vlm_model = PandasTableModel(self.vlm_df, set(VLM_COLUMNS)); self.vlm_view.setModel(self.vlm_model)
         self.vlm_proxy = QtCore.QSortFilterProxyModel(self); self.vlm_proxy.setSourceModel(self.vlm_model); self.vlm_proxy.setFilterKeyColumn(-1); self.vlm_proxy.setFilterCaseSensitivity(QtCore.Qt.CaseInsensitive); self.vlm_view.setModel(self.vlm_proxy)
+        vlm_action_row = QtWidgets.QHBoxLayout()
+        vlm_action_row.setContentsMargins(0, 0, 0, 4)
+        vlm_action_row.addWidget(self.btn_generate_vlm)
+        vlm_action_row.addStretch(1)
+        vlm_layout.addLayout(vlm_action_row)
         vlm_layout.addWidget(QtWidgets.QLabel("VLM is auto-generated: SDTM --ORRES and SUPP-- QVAL only; ADaM chooses AVAL or AVALC per PARAMCD/PARAM where-clause."))
         self.vlm_filter = QtWidgets.QLineEdit(); self.vlm_filter.setPlaceholderText("Filter value metadata..."); self.vlm_filter.textChanged.connect(lambda t: self.apply_tab_filter(self.vlm_proxy, t)); vlm_layout.addWidget(self.vlm_filter)
         vlm_layout.addWidget(self.vlm_view); self.tabs.addTab(self.tab_vlm, "Value Metadata")
 
         self.tab_validation = QtWidgets.QWidget(); val_layout = QtWidgets.QVBoxLayout(self.tab_validation)
+        val_action_row = QtWidgets.QHBoxLayout()
+        val_action_row.setContentsMargins(0, 0, 0, 4)
+        val_action_row.setSpacing(8)
+        val_action_row.addWidget(self.btn_validate)
+        val_action_row.addWidget(self.btn_define)
+        val_action_row.addWidget(self.btn_export)
+        val_layout.addLayout(val_action_row)
         self.validation_summary_label = QtWidgets.QLabel("Errors - 0, Warnings - 0")
         self.validation_summary_label.setObjectName("ValidationSummary")
         val_layout.addWidget(self.validation_summary_label)
@@ -5142,13 +6277,15 @@ class DefineStudio(QtWidgets.QWidget):
 
         self.set_status("Ready - Define XML Generator loaded", state="info")
         self.btn_data.clicked.connect(self.browse_data)
+        self.btn_load_inputs.clicked.connect(self.load_define_inputs_json)
+        self.btn_export_inputs.clicked.connect(self.export_define_inputs_json)
+        self.auto_import_inputs_chk.stateChanged.connect(self.save_auto_import_preference)
         self.btn_load_spec.clicked.connect(self.load_spec_data_and_build_metadata)
         self.btn_refresh_formats.clicked.connect(self.generate_ct_only)
         self.btn_generate_vlm.clicked.connect(self.generate_vlm_only)
         self.btn_validate.clicked.connect(self.validate_define_inputs)
         self.btn_define.clicked.connect(self.generate_define_xml)
         self.btn_export.clicked.connect(self.export_review_xlsx)
-        self.btn_nav_inputs.clicked.connect(lambda: self.show_workflow_page("inputs"))
         self.btn_nav_load.clicked.connect(lambda: self.show_workflow_page("load"))
         self.btn_nav_define.clicked.connect(lambda: self.show_workflow_page("define"))
         self.standard_combo.currentTextChanged.connect(self.update_version_dropdowns_for_standard)
@@ -5227,6 +6364,173 @@ class DefineStudio(QtWidgets.QWidget):
         the CDISC Library API key.
         """
         return
+
+    def get_define_inputs_config(self):
+        """Return the current Inputs-tab values as define_inputs.json content."""
+        return {
+            "sharepoint_site": safe_text(self.site_edit.text()),
+            "spec_file_path": safe_text(self.sp_file_edit.text()),
+            "xpt_folder": safe_text(self.dataset_edit.text()),
+            "standard": combo_text(self.standard_combo),
+            "define_version": combo_text(self.define_combo),
+            "odm_version": combo_text(self.odm_edit),
+            "ig_version": combo_text(self.ig_edit),
+            "ct_version": combo_text(self.ct_edit),
+            "study_id": safe_text(self.study_id_edit.text()),
+            "study_title": safe_text(self.study_desc_edit.text()),
+            "meddra_version": combo_text(self.meddra_edit),
+            "whodrug_version": combo_text(self.whodrug_edit),
+            "load_value_metadata_from_specification": bool(self.load_spec_vlm_chk.isChecked()),
+            "documents": {
+                "acrf": {
+                    "enabled": bool(self.include_acrf.isChecked()),
+                    "filename": safe_text(self.acrf_file_edit.text()) or "acrf.pdf",
+                },
+                "csdrg": {
+                    "enabled": bool(self.include_csdrg.isChecked()),
+                    "filename": safe_text(self.csdrg_file_edit.text()) or "csdrg.pdf",
+                },
+                "adrg": {
+                    "enabled": bool(self.include_adrg.isChecked()),
+                    "filename": safe_text(self.adrg_file_edit.text()) or "adrg.pdf",
+                },
+            },
+            "auto_import_inputs": bool(self.auto_import_inputs_chk.isChecked()),
+        }
+
+    def apply_define_inputs_config(self, cfg):
+        """Populate Inputs-tab widgets from define_inputs.json without changing generation logic."""
+        if not isinstance(cfg, dict):
+            raise ValueError("define_inputs.json must contain a JSON object.")
+
+        def set_line(widget, key):
+            if key in cfg:
+                widget.setText(safe_text(cfg.get(key)))
+
+        set_line(self.site_edit, "sharepoint_site")
+        set_line(self.sp_file_edit, "spec_file_path")
+        set_line(self.dataset_edit, "xpt_folder")
+        set_line(self.study_id_edit, "study_id")
+        set_line(self.study_desc_edit, "study_title")
+
+        if "standard" in cfg:
+            set_combo_text(self.standard_combo, cfg.get("standard"))
+            # Changing standard refreshes IG/CT lists. Apply saved IG/CT after that.
+            self.update_version_dropdowns_for_standard()
+        if "define_version" in cfg:
+            set_combo_text(self.define_combo, cfg.get("define_version"))
+        if "odm_version" in cfg:
+            set_combo_text(self.odm_edit, cfg.get("odm_version"))
+        if "ig_version" in cfg:
+            set_combo_text(self.ig_edit, cfg.get("ig_version"))
+        if "ct_version" in cfg:
+            set_combo_text(self.ct_edit, cfg.get("ct_version"))
+        if "meddra_version" in cfg:
+            set_combo_text(self.meddra_edit, cfg.get("meddra_version"))
+        if "whodrug_version" in cfg:
+            set_combo_text(self.whodrug_edit, cfg.get("whodrug_version"))
+        if "load_value_metadata_from_specification" in cfg:
+            self.load_spec_vlm_chk.setChecked(bool(cfg.get("load_value_metadata_from_specification")))
+
+        docs = cfg.get("documents", {}) or {}
+        if isinstance(docs, dict):
+            acrf = docs.get("acrf", {}) or {}
+            csdrg = docs.get("csdrg", {}) or {}
+            adrg = docs.get("adrg", {}) or {}
+            if "enabled" in acrf:
+                self.include_acrf.setChecked(bool(acrf.get("enabled")))
+            if "filename" in acrf:
+                self.acrf_file_edit.setText(safe_text(acrf.get("filename")) or "acrf.pdf")
+            if "enabled" in csdrg:
+                self.include_csdrg.setChecked(bool(csdrg.get("enabled")))
+            if "filename" in csdrg:
+                self.csdrg_file_edit.setText(safe_text(csdrg.get("filename")) or "csdrg.pdf")
+            if "enabled" in adrg:
+                self.include_adrg.setChecked(bool(adrg.get("enabled")))
+            if "filename" in adrg:
+                self.adrg_file_edit.setText(safe_text(adrg.get("filename")) or "adrg.pdf")
+
+        if "auto_import_inputs" in cfg:
+            self.auto_import_inputs_chk.blockSignals(True)
+            self.auto_import_inputs_chk.setChecked(bool(cfg.get("auto_import_inputs")))
+            self.auto_import_inputs_chk.blockSignals(False)
+
+    def read_define_inputs_file(self, path=None):
+        path = path or DEFAULT_INPUTS_PATH
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"define_inputs.json not found:\n{path}")
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def write_define_inputs_file(self, path=None):
+        path = path or DEFAULT_INPUTS_PATH
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.get_define_inputs_config(), f, indent=2)
+        return path
+
+    def load_define_inputs_json(self):
+        """Load study/setup inputs from define_inputs.json into the GUI."""
+        path = DEFAULT_INPUTS_PATH
+        if not os.path.exists(path):
+            chosen, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "Select define_inputs.json",
+                str(Path(DEFAULT_INPUTS_PATH).parent),
+                "JSON Files (*.json);;All Files (*)",
+            )
+            if not chosen:
+                return
+            path = chosen
+        try:
+            cfg = self.read_define_inputs_file(path)
+            self.apply_define_inputs_config(cfg)
+            self.set_status(f"Inputs loaded from {path}", "done")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Load Inputs failed", str(e))
+            self.set_status(f"Load Inputs failed: {e}", "error")
+
+    def export_define_inputs_json(self):
+        """Export current GUI inputs to define_inputs.json."""
+        path = DEFAULT_INPUTS_PATH
+        try:
+            os.makedirs(str(Path(path).parent), exist_ok=True)
+            self.write_define_inputs_file(path)
+            self.set_status(f"Inputs exported to {path}", "done")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Export Inputs failed", str(e))
+            self.set_status(f"Export Inputs failed: {e}", "error")
+
+    def save_auto_import_preference(self):
+        """Persist only the checkbox state by updating/creating define_inputs.json."""
+        try:
+            cfg = {}
+            if os.path.exists(DEFAULT_INPUTS_PATH):
+                try:
+                    cfg = self.read_define_inputs_file(DEFAULT_INPUTS_PATH)
+                except Exception:
+                    cfg = {}
+            if not isinstance(cfg, dict) or not cfg:
+                cfg = self.get_define_inputs_config()
+            cfg["auto_import_inputs"] = bool(self.auto_import_inputs_chk.isChecked())
+            with open(DEFAULT_INPUTS_PATH, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            self.set_status("Auto import preference saved", "done")
+        except Exception as e:
+            self.set_status(f"Auto import preference could not be saved: {e}", "error")
+
+    def auto_import_define_inputs_if_enabled(self):
+        """At startup, load define_inputs.json only when auto_import_inputs is true."""
+        if not os.path.exists(DEFAULT_INPUTS_PATH):
+            return
+        cfg = self.read_define_inputs_file(DEFAULT_INPUTS_PATH)
+        if bool(cfg.get("auto_import_inputs")):
+            self.apply_define_inputs_config(cfg)
+            self.set_status(f"Auto imported inputs from {DEFAULT_INPUTS_PATH}", "done")
+        else:
+            # Show the saved checkbox state as off and keep default GUI values.
+            self.auto_import_inputs_chk.blockSignals(True)
+            self.auto_import_inputs_chk.setChecked(False)
+            self.auto_import_inputs_chk.blockSignals(False)
 
     def browse_config(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select JSON config", str(Path.home()), "JSON Files (*.json);;All Files (*)")
@@ -5444,6 +6748,7 @@ class DefineStudio(QtWidgets.QWidget):
         inv_rows = []
         meta_rows = []
         self.datasets = {}
+        self.xpt_dataset_labels = {}
         files = [p for p in Path(folder).glob("*.xpt")]
         if not files:
             QtWidgets.QMessageBox.warning(self, "No XPT files", "The selected folder does not contain any .xpt files. Only XPT data is accepted.")
@@ -5461,8 +6766,12 @@ class DefineStudio(QtWidgets.QWidget):
                 formats = getattr(meta, "variable_display_width", {}) or {}
                 original_types = getattr(meta, "original_variable_types", {}) or {}
                 labels2 = getattr(meta, "column_names_to_labels", {}) or {}
+                dataset_label = get_xpt_dataset_label_from_meta(meta, p, ds)
+                if dataset_label:
+                    self.xpt_dataset_labels[ds] = dataset_label
                 inv_rows.append({
                     "Dataset": ds,
+                    "Dataset Label": dataset_label,
                     "File": p.name,
                     "Variables": len(df.columns),
                     "Records": len(df),
@@ -5471,8 +6780,9 @@ class DefineStudio(QtWidgets.QWidget):
                 for i, col in enumerate(df.columns, start=1):
                     stype = storage_types.get(col) or storage_types.get(col.lower()) or storage_types.get(col.upper()) or str(df[col].dtype)
                     label = labels.get(col) or labels2.get(col) or labels2.get(col.lower()) or ""
-                    inferred_type, inferred_len, inferred_fmt = infer_type_from_values(df[col], stype, "")
-                    data_len = inferred_len if inferred_type == "char" else 8
+                    physical_len = get_xpt_variable_length(meta, col, df[col], stype)
+                    inferred_type, inferred_len, inferred_fmt = infer_type_from_values(df[col], stype, physical_len)
+                    data_len = physical_len if inferred_type == "char" else 8
                     meta_rows.append({
                         "Dataset": ds, "Variable": col, "Label": safe_text(label),
                         "Data Type": inferred_type, "Data Length": data_len,
@@ -5500,16 +6810,44 @@ class DefineStudio(QtWidgets.QWidget):
         spec = self.normalized_spec.copy()
         spec["Dataset"] = spec["Dataset"].apply(safe_upper)
         spec["Variable"] = spec["Variable"].apply(safe_upper)
+
+        # SUPP/SQ datasets in TMP-BS-016 are represented by one generic SUPP--
+        # template sheet, not one worksheet per SUPP domain.  Build actual SUPP
+        # specs from the selected XPT metadata so SUPPAE/SUPPCM/etc. appear only
+        # when those XPT files exist.  Existing explicit spec rows are not
+        # overwritten, but XPT physical metadata still wins below after merge.
+        supp_xpt_spec = build_supp_rows_from_xpt_metadata(
+            self.spec_path,
+            self.dataset_metadata,
+            existing_spec=spec,
+        )
+        if not supp_xpt_spec.empty:
+            spec = pd.concat([spec, supp_xpt_spec], ignore_index=True)
+
+        # Keep only explicit spec rows marked KEEP=1, but do not let the spec drive
+        # the final submitted metadata.  The selected XPT files are the physical
+        # source of truth.  Therefore every variable present in XPT is retained;
+        # spec metadata is used only to enrich define fields such as ID Var,
+        # codelist/format, origin and comments.
         spec = spec[spec["Keep"].apply(normalize_keep)].copy()
+        self.domains_df = apply_xpt_dataset_labels_to_domains(
+            getattr(self, "domains_df", pd.DataFrame(columns=DOMAIN_COLUMNS)),
+            getattr(self, "xpt_dataset_labels", {}),
+            getattr(self, "dataset_metadata", pd.DataFrame()),
+            safe_upper(combo_text(self.standard_combo)) if hasattr(self, "standard_combo") else "SDTM",
+        )
+        spec = apply_dataset_keys_to_spec(spec, getattr(self, "domains_df", pd.DataFrame(columns=DOMAIN_COLUMNS)))
         dmeta = self.dataset_metadata.copy()
         if not dmeta.empty:
             dmeta["Dataset"] = dmeta["Dataset"].apply(safe_upper)
             dmeta["Variable"] = dmeta["Variable"].apply(safe_upper)
-        # Metadata Editor should include only variables that are both:
-        #   1) KEEP=1 in the specification
-        #   2) physically present in the selected XPT datasets
-        # Use inner join so spec-only variables are excluded from the editable define metadata.
-        merged = spec.merge(dmeta, on=["Dataset", "Variable"], how="inner", suffixes=("", "_DATA"))
+
+        # XPT-priority merge:
+        #   - all XPT variables are included in the editor
+        #   - spec-only variables are excluded because they are not submitted
+        #   - physical fields from XPT win: label, type, length, order, source
+        #   - spec fields are supplemental: Keep, ID Var, format, origin, comments
+        merged = dmeta.merge(spec, on=["Dataset", "Variable"], how="left", suffixes=("_DATA", ""))
         rows = []
         for _, r in merged.iterrows():
             data_type = safe_text(r.get("Data Type"))
@@ -5518,37 +6856,73 @@ class DefineStudio(QtWidgets.QWidget):
             data_len = safe_text(r.get("Data Length"))
             spec_len = safe_text(r.get("Len"))
             final_len = data_len or spec_len or ("200" if final_type == "char" else "8")
-            fmt = default_format_for_variable(r.get("Variable"), safe_text(r.get("Control or Format")))
+
+            # Codelist/format should come from spec when available.  If the
+            # variable is XPT-only, keep the physical data display format.
+            spec_fmt = safe_text(r.get("Control or Format"))
+            data_fmt = safe_text(r.get("Data Format"))
+            fmt = default_format_for_variable(r.get("Variable"), spec_fmt) if spec_fmt else data_fmt
+
+            # Do not auto-populate standard SDTM codelists from variable names.
+            # Format must come only from the spec Control/Format cell or from user edits.
+
             if is_dtc_iso_variable(r.get("Variable"), fmt):
-                # Keep final_len from XPT metadata, but show correct Define metadata.
+                # Keep ISO 8601 in both display-format and ISO-format locations
+                # in the Define stylesheet output.
                 final_type = "date"
                 fmt = "ISO 8601"
+                final_len = "ISO 8601"
+
+            origin = safe_text(r.get("Origin"))
+            xpt_source_file = safe_text(r.get("Source_DATA")) or safe_text(r.get("Source"))
             rows.append({
                 "Dataset": safe_upper(r.get("Dataset")),
                 "Variable": safe_upper(r.get("Variable")),
-                "Label": safe_text(r.get("Label")) or safe_text(r.get("Label_DATA")),
-                "Keep": sas_best_text(r.get("Keep")),
+                "Label": safe_text(r.get("Label_DATA")) or safe_text(r.get("Label")),
+                "Keep": sas_best_text(r.get("Keep")) or "1",
                 "ID Var": sas_best_text(r.get("ID Var")),
                 "Length": final_len,
                 "Type": final_type,
                 "Format": fmt,
-                "Origin": safe_text(r.get("Origin")),
-                "Source": default_origin_source(r.get("Origin"), r.get("Source")),
+                "Origin": origin,
+                "Pages": safe_text(r.get("Pages")),
+                "Source": default_origin_source(origin, r.get("Source")),
                 "Has No Data": yes_no(r.get("Has No Data"), default="No"),
                 "Comments": safe_text(r.get("Comments")),
                 "Data Type": data_type,
                 "Data Format": safe_text(r.get("Data Format")),
                 "Order": safe_text(r.get("Order")),
-                "XPT Source": safe_text(r.get("Source")),
+                "XPT Source": xpt_source_file,
             })
         self.editor_df = pd.DataFrame(rows, columns=EDITOR_COLUMNS)
+        # Apply Datasets-sheet Key Variables directly to the final editor rows.
+        # This also covers key variables that were present in XPT but missing or
+        # blank in the domain sheet/spec rows used during the merge.
+        self.editor_df = apply_dataset_keys_to_spec(
+            self.editor_df,
+            getattr(self, "domains_df", pd.DataFrame(columns=DOMAIN_COLUMNS))
+        )
+        # If Key Variables / ID Var are still missing, infer practical
+        # KeySequence values from XPT-present standard variables.  XPT itself
+        # has no key metadata, so this never overwrites explicit spec/Datasets
+        # keys because fallback only runs when all keys are blank for a dataset.
+        current_standard = safe_upper(combo_text(self.standard_combo)) if hasattr(self, "standard_combo") else "SDTM"
+        self.editor_df = apply_xpt_key_fallback(self.editor_df, current_standard)
         self.editor_model.set_df(self.editor_df)
         self.install_editor_delegates()
         self.editor_view.resizeColumnsToContents()
         self.editor_view.setColumnWidth(2, 280)
         if "Comments" in self.editor_df.columns:
             self.editor_view.setColumnWidth(list(self.editor_df.columns).index("Comments"), 320)
-        self.set_status(f"Metadata editor built with KEEP=1 and XPT-present rows: {len(self.editor_df)}")
+        generated_supp_count = 0
+        try:
+            generated_supp_count = len(supp_xpt_spec)
+        except Exception:
+            generated_supp_count = 0
+        msg = f"Metadata editor built with KEEP=1 and XPT-present rows: {len(self.editor_df)}"
+        if generated_supp_count:
+            msg += f"; generated SUPP/SQ spec rows from XPT: {generated_supp_count}"
+        self.set_status(msg)
 
     def install_editor_delegates(self):
         for col_name, options in [("Type", TYPE_OPTIONS), ("Origin", ORIGIN_OPTIONS), ("Has No Data", ["No", "Yes"])]:
@@ -5566,6 +6940,7 @@ class DefineStudio(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Metadata missing", "Build Metadata Editor first.")
             return
         self.set_status("Generating formats from spec-defined codelists and XPT values...")
+        current_standard = safe_upper(combo_text(self.standard_combo)) if hasattr(self, "standard_combo") else "SDTM"
         ct_version = combo_text(self.ct_edit).strip()
         self.ct_alias_map = fetch_define_ct_map(
             self.cdisc_api_key,
@@ -5664,8 +7039,14 @@ class DefineStudio(QtWidgets.QWidget):
                 # For DOMAIN codelist, Decode should be the dataset label/description from Domains sheet.
                 if safe_upper(fmt) == "DOMAIN" or safe_upper(code_col) in {"DOMAIN", "RDOMAIN"}:
                     if hasattr(self, "domains_df") and not self.domains_df.empty:
-                        dmap = {safe_upper(r.get("Dataset")): safe_text(r.get("Description")) for _, r in self.domains_df.iterrows()}
-                        decode = dmap.get(safe_upper(code), decode or code)
+                        dmap = {}
+                        for _, r in self.domains_df.iterrows():
+                            _ds = safe_upper(r.get("Dataset"))
+                            _desc = safe_text(r.get("Description"))
+                            if not _desc or safe_upper(_desc) == _ds:
+                                _desc = default_dataset_description(_ds, current_standard)
+                            dmap[_ds] = _desc
+                        decode = dmap.get(safe_upper(code), default_dataset_description(code, current_standard) if safe_upper(code) == safe_upper(decode or code) else (decode or code))
                 # For self-decode codelists such as EPOCH/PARCAT1, use the value as decode.
                 if not decode and safe_upper(code_col) in {"PARAM", "PARCAT1", "PARCAT2", "PARCAT3", "VISIT", "AVISIT", "EPOCH", "DOMAIN", "RDOMAIN", "ELEMENT", "DATEST"}:
                     decode = code
@@ -5675,13 +7056,13 @@ class DefineStudio(QtWidgets.QWidget):
                 # If synonym is missing, preserve the already assigned Decode.
                 ct_synonym = get_ct_synonym_generic(ct_info, code)
                 final_decode = ct_synonym or decode or code
-                term_code = get_ct_term_code_generic(ct_info, code) or known_term_nci_code(fmt, code)
+                term_code = get_ct_term_code_generic(ct_info, code)
                 rows.append({
                     "Order": "",
                     "Format": fmt,
                     "Code": code,
                     "Decode": final_decode,
-                    "Codelist Code": safe_text(ct_info.get("codelist_code", "")) or known_codelist_nci_code(fmt),
+                    "Codelist Code": safe_text(ct_info.get("codelist_code", "")),
                     "Term Code": term_code,
                     "Source Dataset": ds,
                     "Source Variable": safe_upper(code_col),
@@ -5710,7 +7091,7 @@ class DefineStudio(QtWidgets.QWidget):
 
                 def _fill_ct_codes(r):
                     info = get_ct_info_generic(self.ct_alias_map, r.get("Format"))
-                    return safe_text(r.get("Codelist Code")) or safe_text(info.get("codelist_code", "")) or known_codelist_nci_code(r.get("Format"))
+                    return safe_text(r.get("Codelist Code")) or safe_text(info.get("codelist_code", ""))
                 self.formats_df["Codelist Code"] = self.formats_df.apply(_fill_ct_codes, axis=1)
 
                 def _fill_term_codes(r):
@@ -5719,7 +7100,6 @@ class DefineStudio(QtWidgets.QWidget):
                 self.formats_df["Term Code"] = self.formats_df.apply(_fill_term_codes, axis=1)
         except Exception:
             pass
-
 
         # Remove duplicate decode-side CT rows such as ETCD rows created again from ELEMENT.
         try:
@@ -5868,16 +7248,7 @@ class DefineStudio(QtWidgets.QWidget):
         except Exception:
             pass
 
-
-
-
-
-
-
-
-
-
-
+        self.formats_df = mark_missing_ct_codes_for_review(self.formats_df)
 
         self.formats_model.set_df(self.formats_df)
         tune_table_widths(self.formats_view, {
@@ -5926,6 +7297,7 @@ class DefineStudio(QtWidgets.QWidget):
             else:
                 rows.extend(self.generate_adam_vlm_rows())
             self.vlm_df = pd.DataFrame(rows, columns=VLM_COLUMNS)
+        self.vlm_df = self.normalize_vlm_types_and_formats(self.vlm_df)
         self.vlm_df = self.normalize_vlm_lengths_against_parent(self.vlm_df)
         if isinstance(self.vlm_df, pd.DataFrame) and not self.vlm_df.empty:
             if "Source" not in self.vlm_df.columns:
@@ -5951,8 +7323,30 @@ class DefineStudio(QtWidgets.QWidget):
         self.tabs.setCurrentWidget(self.tab_vlm)
 
     def result_type_len_format(self, series):
-        dtype, length, fmt = infer_type_from_values(series)
+        """Derive VLM Type/Length/Format from submitted XPT values only.
+
+        No spec override is used here. For SDTM --ORRES VLM, Pinnacle expects
+        the value-level data type to reflect the actual submitted values for
+        that where-clause: text, integer, or float. Decimal values such as
+        183.6, 170.27, 197.0, or 228.69 must therefore become float with a
+        display format carrying the observed decimal places.
+        """
+        dtype, length, fmt = infer_vlm_type_len_format(series, "", "", "")
         return dtype, length, fmt
+
+    def supp_qval_type_len_format(self, series):
+        """Return SUPP-- QVAL VLM metadata using QVAL's submitted character values.
+
+        QVAL is a character variable in SUPP/SQ datasets. Values such as
+        06470002002 may look numeric, but they are identifiers/qualifier values
+        and must not be converted to integer/float or shortened to length 8.
+        Preserve them as text and use the maximum submitted character length for
+        the QNAM group.
+        """
+        vals = [safe_text(v) for v in series.dropna().tolist() if safe_text(v)] if series is not None else []
+        max_len = max([len(v) for v in vals] or [1])
+        parent = self.parent_variable_metadata("", "") if False else {}
+        return "text", str(max_len), ""
 
     def parent_variable_metadata(self, dataset, variable):
         """Return parent variable metadata from the editor grid for a VLM row."""
@@ -5995,6 +7389,140 @@ class DefineStudio(QtWidgets.QWidget):
             return str(parent_len)
         return str(min(vlm_len, parent_len))
 
+    def _norm_vlm_match_text(self, value):
+        """Normalize VLM where/group text for matching generated rows to spec rows."""
+        txt = safe_upper(value)
+        txt = txt.replace(".EQ.", " EQ ").replace("=", " EQ ")
+        txt = re.sub(r"[^A-Z0-9]+", " ", txt)
+        return re.sub(r"\s+", " ", txt).strip()
+
+    def spec_vlm_type_override(self, vlm_row):
+        """Return Type/Length/Format from SharePoint ValueMetadata for a generated VLM row.
+
+        Auto-generated VLM rows are useful for coverage, but when the spec
+        ValueMetadata sheet already defines the row's Type/Length/Format
+        (for example FAORRES where FATESTCD=PLANTOTD is float 8.3), the spec
+        must win.  Matching is intentionally tolerant because generated rows
+        may use 'FATESTCD EQ PLANTOTD(...)' while the spec may use
+        'FATESTCD.EQ.PLANTOTD'.
+        """
+        spec = getattr(self, "spec_vlm_df", pd.DataFrame())
+        if spec is None or getattr(spec, "empty", True):
+            return {}
+
+        ds = safe_upper(vlm_row.get("Dataset"))
+        res = safe_upper(vlm_row.get("Result Variable"))
+        gvar = safe_upper(vlm_row.get("Grouping Variable"))
+        gval = safe_text(vlm_row.get("Group Value"))
+        where = self._norm_vlm_match_text(vlm_row.get("Where Clause"))
+
+        best = None
+        best_score = -1
+        for _, sr in spec.iterrows():
+            if safe_upper(sr.get("Dataset")) != ds:
+                continue
+            if safe_upper(sr.get("Result Variable")) != res:
+                continue
+
+            score = 0
+            sgvar = safe_upper(sr.get("Grouping Variable"))
+            sgval = safe_text(sr.get("Group Value"))
+            swhere = self._norm_vlm_match_text(sr.get("Where Clause"))
+
+            if gvar and sgvar == gvar:
+                score += 2
+            if gval and safe_upper(sgval) == safe_upper(gval):
+                score += 4
+            if where and swhere:
+                if where == swhere or swhere in where or where in swhere:
+                    score += 3
+            # Also support where-clause-only sheets where Grouping Variable/Value are blank.
+            if gvar and gval and swhere:
+                gtok = self._norm_vlm_match_text(f"{gvar} EQ {gval}")
+                if gtok and gtok in swhere:
+                    score += 4
+
+            has_metadata = any(safe_text(sr.get(c)) for c in ["Type", "Length", "Format"])
+            if has_metadata and score > best_score:
+                best = sr
+                best_score = score
+
+        if best is None or best_score <= 0:
+            return {}
+        return {
+            "Type": normalize_vlm_type_name(best.get("Type")),
+            "Length": safe_text(best.get("Length")),
+            "Format": safe_text(best.get("Format")),
+        }
+
+    def normalize_vlm_types_and_formats(self, vlm_df):
+        """Normalize VLM Type/Length/Format using XPT submitted values as priority.
+
+        Priority used in this tool from now on:
+          1. Filtered XPT values for the VLM where-clause/grouping.
+          2. Existing row metadata only when no matching XPT values are available.
+
+        This intentionally does NOT give priority to the spec ValueMetadata Type/
+        Length/Format. It fixes FAORRES/LBORRES-style rows where decimal XPT
+        values were still carried as integer in VLM.
+        """
+        if vlm_df is None or getattr(vlm_df, "empty", True):
+            return vlm_df
+        df = vlm_df.copy()
+        for c in ["Type", "Length", "Format"]:
+            if c not in df.columns:
+                df[c] = ""
+
+        for i, row in df.iterrows():
+            ds = safe_upper(row.get("Dataset"))
+            res = safe_upper(row.get("Result Variable"))
+            series = None
+
+            # Build the exact subset from the submitted XPT data using all
+            # grouping variables available on the VLM row.
+            try:
+                if ds in self.datasets and res in self.datasets[ds].columns:
+                    sub = self.datasets[ds]
+
+                    filters = []
+                    gvar = safe_upper(row.get("Grouping Variable"))
+                    gval = safe_text(row.get("Group Value"))
+                    if gvar and gval:
+                        filters.append((gvar, gval))
+
+                    for n in range(1, 5):
+                        gv = safe_upper(row.get(f"Grouping Variable {n}"))
+                        vv = safe_text(row.get(f"Group Value {n}"))
+                        if gv and vv:
+                            filters.append((gv, vv))
+
+                    for gv, vv in filters:
+                        if gv in sub.columns:
+                            sub = sub[sub[gv].apply(lambda x, target=vv: safe_text(x) == target)]
+
+                    if not sub.empty:
+                        series = sub[res]
+            except Exception:
+                series = None
+
+            # XPT values win. Existing Type/Length/Format is only fallback when
+            # there are no matching XPT values.
+            if ds.startswith("SUPP") and res == "QVAL":
+                if series is not None and len([safe_text(v) for v in series.dropna().tolist() if safe_text(v)]) > 0:
+                    dtype, length, fmt = self.supp_qval_type_len_format(series)
+                else:
+                    dtype, length, fmt = "text", safe_text(row.get("Length")) or "200", ""
+            elif series is not None and len([safe_text(v) for v in series.dropna().tolist() if safe_text(v)]) > 0:
+                dtype, length, fmt = infer_vlm_type_len_format(series, "", "", "")
+            else:
+                dtype, length, fmt = infer_vlm_type_len_format(None, row.get("Type"), row.get("Length"), row.get("Format"))
+
+            df.at[i, "Type"] = normalize_vlm_type_name(dtype)
+            df.at[i, "Length"] = safe_text(length)
+            df.at[i, "Format"] = safe_text(fmt)
+
+        return df
+
     def normalize_vlm_lengths_against_parent(self, vlm_df):
         """Normalize generated/imported VLM lengths against parent variable length."""
         if vlm_df is None or getattr(vlm_df, "empty", True):
@@ -6018,7 +7546,7 @@ class DefineStudio(QtWidgets.QWidget):
                     if safe_text(qnam) == "":
                         continue
                     qlabel = safe_text(qdf[label_var].dropna().iloc[0]) if label_var in qdf and not qdf[label_var].dropna().empty else safe_text(qnam)
-                    dtype, length, fmt = self.result_type_len_format(qdf["QVAL"])
+                    dtype, length, fmt = self.supp_qval_type_len_format(qdf["QVAL"])
                     rows.append(self.vlm_row(ds, "QNAM", qnam, qlabel, [], f"QNAM EQ {qnam}({qlabel})", "QVAL", dtype, length, fmt, "CRF", "Topic", ""))
                 continue
 
@@ -6273,6 +7801,12 @@ class DefineStudio(QtWidgets.QWidget):
                 return
 
             self.set_status("Writing define.xml to XPT folder", "running")
+            domains_for_define = apply_xpt_dataset_labels_to_domains(
+                self.domains_df,
+                getattr(self, "xpt_dataset_labels", {}),
+                self.editor_df,
+                self.standard_combo.currentText(),
+            )
             writer = DefineXmlWriter(
                 standard=self.standard_combo.currentText(),
                 define_version=self.define_combo.currentText(),
@@ -6294,7 +7828,7 @@ class DefineStudio(QtWidgets.QWidget):
                 acrf_file=self.acrf_file_edit.text(),
                 csdrg_file=self.csdrg_file_edit.text(),
                 adrg_file=self.adrg_file_edit.text(),
-                domains_df=self.domains_df,
+                domains_df=domains_for_define,
                 documents_df=self.documents_df,
                 document_links_df=self.document_links_df,
                 datasets=self.datasets,
@@ -6405,12 +7939,11 @@ class DefineStudio(QtWidgets.QWidget):
     def show_workflow_page(self, page_name):
         """Show the requested workflow section in the compact top panel."""
         page_map = {
-            "inputs": 0,
-            "load": 1,
-            "ct": 1,
-            "vlm": 1,
-            "validate": 1,
-            "define": 2,
+            "load": 0,
+            "ct": 0,
+            "vlm": 0,
+            "validate": 0,
+            "define": 1,
         }
         try:
             if hasattr(self, "workflow_stack"):
@@ -6437,7 +7970,7 @@ class DefineStudio(QtWidgets.QWidget):
             vlm_ready = stage in {"vlm", "validated", "generated"}
             validated = stage in {"validated", "generated"}
 
-            nav_state = [True, True, ct_ready or vlm_ready or validated]
+            nav_state = [True, ct_ready or vlm_ready or validated]
             for btn, enabled in zip(getattr(self, "nav_buttons", []), nav_state):
                 btn.setEnabled(enabled)
 
@@ -6454,7 +7987,7 @@ class DefineStudio(QtWidgets.QWidget):
                 w.setEnabled(True)
 
             if is_initial:
-                self.show_workflow_page("inputs")
+                self.show_workflow_page("load")
             elif stage == "metadata":
                 self.show_workflow_page("load")
             elif stage == "formats":

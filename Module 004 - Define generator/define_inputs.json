@@ -1,0 +1,31 @@
+{
+  "sharepoint_site": "Fusion FPI-2265-201 (TATCIST)",
+  "spec_file_path": "Biostats/CSR/SDTMSpecs/SDTMSpec.xlsx",
+  "xpt_folder": "P:/Projects/Fusion Pharmaceuticals Inc/FPI-2265-201 (TATCIST)/Biostat/CSR/SDTMdata/FDA XPTdata",
+  "standard": "SDTM",
+  "define_version": "2.0",
+  "odm_version": "1.3.2",
+  "ig_version": "3.3",
+  "ct_version": "2025-09-26",
+  "study_id": "AZD-2265-201",
+  "study_title": "PSMA-directed Targeted Alpha Therapy with FPI-2265 (225Ac-PSMA-I&T) for the treatment of metastatic Castration-resISTant prostate cancer (TATCIST). A phase II clinical trial.",
+  "meddra_version": "28.0",
+  "whodrug_version": "B3SEP2023",
+  "load_value_metadata_from_specification": true,
+  "documents": {
+    "acrf": {
+      "enabled": true,
+      "filename": "acrf.pdf"
+    },
+    "csdrg": {
+      "enabled": true,
+      "filename": "csdrg.pdf"
+    },
+    "adrg": {
+      "enabled": true,
+      "filename": "adrg.pdf"
+    }
+  },
+  "auto_load_inputs": true,
+  "auto_import_inputs": true
+}
